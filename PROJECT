@@ -1,0 +1,7 @@
+domain: codybaker.com
+repo: github.com/jcodybaker/flipop
+resources:
+- group: flipop
+  kind: FloatingIPPool
+  version: v1
+version: "2"

@@ -1,0 +1,7 @@
+apiVersion: flipop.codybaker.com/v1
+kind: FloatingIPPool
+metadata:
+  name: floatingippool-sample
+spec:
+  # Add fields here
+  foo: bar

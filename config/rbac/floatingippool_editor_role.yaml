@@ -1,0 +1,26 @@
+# permissions to do edit floatingippools.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: floatingippool-editor-role
+rules:
+- apiGroups:
+  - flipop.codybaker.com
+  resources:
+  - floatingippools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - flipop.codybaker.com
+  resources:
+  - floatingippools/status
+  verbs:
+  - get
+  - patch
+  - update
