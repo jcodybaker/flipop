@@ -18,4 +18,5 @@ var (
 type Provider interface {
 	IPtoProviderID(ctx context.Context, ip string) (string, error)
 	AssignIP(ctx context.Context, ip, providerID string) error
+	NodeToIP(ctx context.Context, providerID string) (string, error)
 }

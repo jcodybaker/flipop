@@ -69,13 +69,13 @@ type Target struct {
 
 // FloatingIPPoolStatus defines the observed state of FloatingIPPool.
 type FloatingIPPoolStatus struct {
-	Attached []Attachment `json:"attached,omitempty"`
-	Errors   []string     `json:"errors,omitempty"`
+	IPs   map[string]IPStatus `json:"attached,omitempty"`
+	Error string              `json:"error,omitempty"`
 }
 
-// Attachment describes the mapping between IPs and the matching
+// IPStatus describes the mapping between IPs and the matching
 // resources responsible for their attachment.
-type Attachment struct {
+type IPStatus struct {
 	IP         string `json:"ip"`
 	NodeName   string `json:"nodeName"`
 	ProviderID string `json:"dropletID"`
