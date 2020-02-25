@@ -76,10 +76,11 @@ type FloatingIPPoolStatus struct {
 // IPStatus describes the mapping between IPs and the matching
 // resources responsible for their attachment.
 type IPStatus struct {
-	IP         string `json:"ip"`
-	NodeName   string `json:"nodeName"`
-	ProviderID string `json:"dropletID"`
-	Targets    Target `json:"targets,omitempty"`
+	IP         string   `json:"ip"`
+	NodeName   string   `json:"nodeName"`
+	ProviderID string   `json:"dropletID"`
+	Targets    []Target `json:"targets,omitempty"`
+	Error      string   `json:"error"`
 }
 
 // +kubebuilder:object:root=true

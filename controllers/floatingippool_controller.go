@@ -17,11 +17,11 @@ package controllers
 
 import (
 	"container/list"
+	"context"
 	"fmt"
 	"sync"
 
 	"github.com/go-logr/logr"
-	"istio.io/istio/pkg/log"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -143,6 +143,7 @@ func (r *FloatingIPPoolReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	// // TODO - Reevaluate current nodes.
 	// pool.start()
 	// return ctrl.Result{}, nil
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager ...
@@ -158,6 +159,8 @@ func (r *FloatingIPPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 type floatingIPPool struct {
+	client client.Client
+
 	k8s *flipopv1.FloatingIPPool
 	// cache the parsed selectors
 	nodeSelector labels.Selector
@@ -169,7 +172,7 @@ type floatingIPPool struct {
 	ipToNode       map[string]*node
 
 	// TODO(cbaker) - Track last error time and avoid retrying for x period.
-	ipErrors map[string]string
+	ipToError map[string]string
 
 	// assignableIPs are available for reassignment
 	assignableIPs *list.List
@@ -179,38 +182,37 @@ type floatingIPPool struct {
 	log logr.Logger
 }
 
-func (f *floatingIPPool) updateK8s(resource *flipopv1.FloatingIPPool, providers map[string]provider.Provider) error {
+func (f *floatingIPPool) updateK8s(ctx context.Context, resource *flipopv1.FloatingIPPool, providers map[string]provider.Provider) error {
 	f.k8s = resource.DeepCopy()
 
 	var err error
+	f.nodeSelector = nil
+
 	if f.k8s.Spec.Match.NodeLabel != "" {
 		f.nodeSelector, err = labels.Parse(f.k8s.Spec.Match.NodeLabel)
 		if err != nil {
 			return fmt.Errorf("parsing match node label: %w", err)
 		}
-	} else {
-		f.nodeSelector = labels.Everything()
 	}
 
+	f.podSelector = nil
 	if f.k8s.Spec.Match.PodLabel != "" {
 		f.podSelector, err = labels.Parse(f.k8s.Spec.Match.PodLabel)
 		if err != nil {
 			return fmt.Errorf("parsing match pod label: %w", err)
 		}
-	} else {
-		f.podSelector = labels.Everything()
 	}
 
 	prov := providers[f.k8s.Spec.Provider]
 	if prov == nil {
-
 		// Provided the status update is successful, err will be nil.  That's fine because
 		// retries in this controller won't be successful.
-		return ctrl.Result{}, err
+		return err
 	}
+	return nil
 }
 
-func (f *floatingIPPool) resync(c client.Client) error {
+func (f *floatingIPPool) resync(ctx context.Context, c client.Client) error {
 	f.nodeNameToNode = make(map[string]*node)
 	f.ipToNode = make(map[string]*node)
 	for _, ip := range f.k8s.Spec.IPs {
@@ -223,13 +225,14 @@ func (f *floatingIPPool) resync(c client.Client) error {
 	f.assignableIPs = list.New()
 
 	var nodeList corev1.NodeList
-	err = c.List(ctx, &nodeList, client.MatchingLabelsSelector{Selector: pool.nodeSelector})
+	err := c.List(ctx, &nodeList, client.MatchingLabelsSelector{Selector: f.nodeSelector})
 	if err != nil {
 		return err
 	}
-	for _, k8sNode := range nodeList.List {
-		err = f.updateNode(&k8sNode)
+	for _, k8sNode := range nodeList.Items {
+		err = f.updateNode(ctx, &k8sNode)
 		if err != nil {
+			// TODO - Maybe retry here?
 			return err
 		}
 	}
@@ -242,42 +245,44 @@ func (f *floatingIPPool) resync(c client.Client) error {
 	return nil
 }
 
-func (f *floatingIPPool) assign() error {
-	for _, node := range assignableNodes {
+func (f *floatingIPPool) assign(ctx context.Context) error {
+	for _, n := range f.assignableNodes {
 		if f.assignableIPs.Len() == 0 {
 			return nil
 		}
-		err := prov.AssignIP(ctx, ip, node.Spec.ProviderID)
+		e := f.assignableIPs.Front()
+		ip := e.Value.(string)
+		err := f.provider.AssignIP(ctx, ip, n.getProviderID())
 		if err != nil {
 			// This error might be with the node (ex. already has an IP or a pending action)
-			log.Error(err, "assigning ip to node", "node", node.Name, "ip", ip)
+			f.log.Error(err, "assigning ip to node", "node", n.getName(), "ip", ip)
 			return err
 		}
-		ip := f.assignableIPs.Remove(f.assignableIPs.Front()).(string)
-		ipToNode[ip] = node
+		f.assignableIPs.Remove(e)
+		f.ipToNode[ip] = n
 	}
 	return nil
 }
 
-func (f *floatingIPPool) updateNode(k8s *corev1.Node) error {
+func (f *floatingIPPool) updateNode(ctx context.Context, k8s *corev1.Node) error {
 	n, ok := f.nodeNameToNode[k8s.Name]
 	if !ok {
-		if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+		if !k8s.ObjectMeta.DeletionTimestamp.IsZero() {
 			return nil
 		}
-		providerID := node.Spec.ProviderID
+		providerID := k8s.Spec.ProviderID
 		if providerID == "" {
-			log.Info("node has no provider id, ignoring", "node", node.Name)
+			f.log.Info("node has no provider id, ignoring", "node", k8s.Name)
 			return nil
 		}
 		n = newNode(k8s)
 		f.nodeNameToNode[n.getName()] = n
-		ip, err := f.provider.NodeToIP(providerID)
+		ip, err := f.provider.NodeToIP(ctx, providerID)
 		if err != nil {
 			return err
 		}
 		if ip != "" {
-			delete(f.ipErrors, ip)
+			delete(f.ipToError, ip)
 			oldNode, isIPKnown := f.ipToNode[ip]
 			if isIPKnown {
 				if oldNode != nil {
@@ -290,10 +295,10 @@ func (f *floatingIPPool) updateNode(k8s *corev1.Node) error {
 	}
 
 	if n.ip != "" {
-		delete(n.ipErrors, n.ip)
+		delete(f.ipToError, n.ip)
 	}
 
-	if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !k8s.ObjectMeta.DeletionTimestamp.IsZero() {
 		ip := n.ip
 		f.releaseNode(n)
 		delete(f.nodeNameToNode, n.getName())
@@ -313,9 +318,21 @@ func (f *floatingIPPool) updateNode(k8s *corev1.Node) error {
 	}
 
 	if n.isNodeMatch {
-		if n.k8s.Spec.Match.PodNamespace != "" || n.k8s.Spec.Match.PodMatch != nil {
+		var opts []client.ListOption
+		if f.podSelector != nil {
+			opts = append(opts, client.MatchingLabelsSelector{Selector: f.podSelector})
+		}
+		if f.k8s.Spec.Match.PodNamespace != "" {
+			opts = append(opts, client.InNamespace(f.k8s.Spec.Match.PodNamespace))
+		}
+		if len(opts) > 0 {
 			// TODO - query pods. We had been ignoring this node.
-			// f.Client
+			var podList corev1.PodList
+			err := f.client.List(ctx, &podList, opts...)
+			if err != nil {
+				f.log.Error(err, "querying node pods", "node", n.getName())
+				return fmt.Errorf("querying node pods: %w", err)
+			}
 		}
 		f.setNodeAssignable(n)
 	}
@@ -338,7 +355,7 @@ func (f *floatingIPPool) updatePod(pod *corev1.Pod) error {
 	if f.k8s.Spec.Match.PodNamespace != "" && pod.Namespace != f.k8s.Spec.Match.PodNamespace {
 		return nil
 	}
-	if f.podSelector != nil && !f.podSelector.Matches(f.k8s.Labels) {
+	if f.podSelector != nil && !f.podSelector.Matches(labels.Set(pod.Labels)) {
 		return nil
 	}
 
@@ -355,16 +372,10 @@ func (f *floatingIPPool) updatePod(pod *corev1.Pod) error {
 			f.releaseNode(n)
 		}
 	} else {
-		if pod.Status == nil {
-			if active {
-				delete(n.matchingPods, podKey)
-			}
-			return
-		}
-		running := pod.Status.Phase == corev1.PodPhaseRunning
+		running := pod.Status.Phase == corev1.PodRunning
 		var ready bool
 		for _, cond := range pod.Status.Conditions {
-			if cond.Type == corev1.PodConditionReady {
+			if cond.Type == corev1.PodReady {
 				ready = true
 			}
 		}
@@ -408,22 +419,22 @@ func (f *floatingIPPool) releaseNode(n *node) {
 		delete(f.assignableNodes, n.getName())
 		return
 	}
-	ip = n.ip
+	ip := n.ip
 	n.ip = ""
 	f.assignableIPs.PushBack(ip)
 }
 
-func (f *floatingIPPool) setStatus(errMsg string) error {
+func (f *floatingIPPool) setStatus(ctx context.Context, errMsg string) error {
 	status := flipopv1.FloatingIPPoolStatus{}
-	for ip, n := range ipToNode {
-		ipStatus = &flipopv1.IPStatus{
-			Error: f.ipErrors[ip],
+	for ip, n := range f.ipToNode {
+		ipStatus := &flipopv1.IPStatus{
+			Error: f.ipToError[ip],
 		}
 		if n != nil {
 			ipStatus.NodeName = n.getName()
 			ipStatus.ProviderID = n.getProviderID()
-			for _, pod := range n.pods {
-				ipStatus.Targets = append(ipStatus.Targets, flipopv1.IPStatus{
+			for _, pod := range n.matchingPods {
+				ipStatus.Targets = append(ipStatus.Targets, flipopv1.Target{
 					APIVersion: pod.APIVersion,
 					Kind:       pod.Kind,
 					Name:       pod.Name,
@@ -433,18 +444,18 @@ func (f *floatingIPPool) setStatus(errMsg string) error {
 		}
 		status.IPs[ip] = *ipStatus
 	}
-	status.error = errMsg
-	updatedPool.Status = status
-	return r.Status().Update(ctx, &updatedPool)
+	status.Error = errMsg
+	f.k8s.Status = status
+	return f.client.Status().Update(ctx, f.k8s)
 }
 
-func (f *floatingIPPool) isNodeMatch(node *corev1.Node) (bool, error) {
-	if f.nodeSelector.Matches(labels.Set(node.Labels)) {
+func (f *floatingIPPool) isNodeMatch(n *node) (bool, error) {
+	if f.nodeSelector.Matches(labels.Set(n.k8s.Labels)) {
 		return false, nil
 	}
 
 taintLoop:
-	for _, taint := range node.Spec.Taints {
+	for _, taint := range n.k8s.Spec.Taints {
 		for _, tol := range f.k8s.Spec.Match.Tolerations {
 			if tol.ToleratesTaint(&taint) {
 				continue taintLoop
