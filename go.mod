@@ -5,10 +5,12 @@ go 1.13
 require (
 	github.com/digitalocean/godo v1.30.0
 	github.com/go-logr/logr v0.1.0
+	github.com/go-logr/zapr v0.1.0
 	github.com/mmcshane/testify v1.2.2
 	github.com/onsi/ginkgo v1.8.0
 	github.com/onsi/gomega v1.5.0
 	github.com/stretchr/testify v1.5.1 // indirect
+	go.uber.org/zap v1.9.1
 	golang.org/x/oauth2 v0.0.0-20190604053449-0f29369cfe45
 	k8s.io/api v0.0.0-20190918155943-95b840bb6a1f
 	k8s.io/apimachinery v0.0.0-20190913080033-27d36303b655
