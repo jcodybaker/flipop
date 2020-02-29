@@ -51,9 +51,15 @@ type FloatingIPPoolReconciler struct {
 
 // +kubebuilder:rbac:groups=flipop.codybaker.com,resources=floatingippools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=flipop.codybaker.com,resources=floatingippools/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/status,verbs=get
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes/status,verbs=get
 
 // Reconcile assigns floating IPs to matching nodes.
 func (r *FloatingIPPoolReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+	ctx := context.Background()
+	switch ()
 	// ctx := context.Background()
 	// log := r.Log.WithValues("floatingippool", req.NamespacedName)
 
@@ -151,6 +157,26 @@ func (r *FloatingIPPoolReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 func (r *FloatingIPPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&flipopv1.FloatingIPPool{}).
+		Complete(r)
+	if err != nil {
+		return err
+	}
+
+	// For now we watch all pod updates. In the median case that's probably unlikely and very
+	// wasteful. While the controller framework offers support for filtering to namespace / labels
+	// it doesn't seem to be dynamic. A controller watch cannot be modified or removed once added
+	// to a manager.
+	err = ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Pod{}).
+		Complete(r)
+	if err != nil {
+		return err
+	}
+
+	// Same deal with nodes. In practice every pod scheduling/delete triggers a node update, while
+	// we likely only care about a small (but dynamically prescribed) subset.
+	err = ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Node{}).
 		Complete(r)
 	if err != nil {
 		return err
