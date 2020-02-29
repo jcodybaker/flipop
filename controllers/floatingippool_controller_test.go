@@ -150,12 +150,33 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 }
 
 func TestUpdateNode(t *testing.T) {
+	// NOTE - This also gets exercised in updateK8s
 	tcs := []struct {
 		name                  string
 		initialIPs            map[string]string
 		updates               []metav1.Object
 		expectAssignableNodes []string
+		expectIPs             map[string]string
+		expectAssignableIPs   []string
 	}{
+		{
+			name: "initial update ready",
+			updates: []metav1.Object{
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+			},
+			expectAssignableNodes: []string{"rio-grande"},
+			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
+		},
+		{
+			name: "initial update not-ready",
+			updates: []metav1.Object{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+			},
+			expectAssignableNodes: []string{},
+			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
+		},
 		{
 			name: "update from not-ready to ready",
 			updates: []metav1.Object{
@@ -166,7 +187,14 @@ func TestUpdateNode(t *testing.T) {
 				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not yet ready
 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
 			},
-			expectAssignableNodes: []string{"rio-grande"},
+			expectAssignableNodes: []string{}, // empty because the node already has an IP.
+			initialIPs: map[string]string{ // Mark the IP as already attached
+				"mock://1": "172.16.2.2",
+			},
+			expectIPs: map[string]string{
+				"rio-grande": "172.16.2.2",
+			},
+			expectAssignableIPs: []string{"192.168.1.1"},
 		},
 		{
 			name: "update from ready to not-ready",
@@ -179,6 +207,15 @@ func TestUpdateNode(t *testing.T) {
 				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not ready
 			},
 			expectAssignableNodes: []string{},
+			initialIPs: map[string]string{ // Mark the IP as already attached
+				"mock://1": "172.16.2.2",
+			},
+			// The rio-grande node record should still know that the IP is associated, but it should
+			// also be available for assignment if another matching node is available.
+			expectIPs: map[string]string{
+				"rio-grande": "172.16.2.2",
+			},
+			expectAssignableIPs: []string{"192.168.1.1", "172.16.2.2"},
 		},
 	}
 	for _, tc := range tcs {
@@ -191,11 +228,6 @@ func TestUpdateNode(t *testing.T) {
 			f := &floatingIPPool{
 				client: fake.NewFakeClientWithScheme(scheme.Scheme),
 				log:    zapr.NewLogger(log),
-				provider: &provider.MockProvider{
-					NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
-						return tc.initialIPs[providerID], nil
-					},
-				},
 			}
 			providers := map[string]provider.Provider{
 				"mock": &provider.MockProvider{
@@ -219,11 +251,129 @@ func TestUpdateNode(t *testing.T) {
 					require.NoError(t, err)
 				}
 			}
-			var assignableNodes []string
+			var assignableIPs, assignableNodes []string
+			for e := f.assignableIPs.Front(); e != nil; e = e.Next() {
+				assignableIPs = append(assignableIPs, e.Value.(string))
+			}
 			for _, n := range f.assignableNodes {
 				assignableNodes = append(assignableNodes, n.getName())
 			}
+			for name, ip := range tc.expectIPs {
+				n, ok := f.nodeNameToNode[name]
+				require.Truef(t, ok, "node %q does not have ip %q", name, ip)
+				require.Equal(t, ip, n.ip)
+			}
+			for name, n := range f.nodeNameToNode {
+				if _, ok := f.nodeNameToNode[name]; ok {
+					continue
+				}
+				require.Equal(t, "", n.ip)
+			}
 			require.ElementsMatch(t, tc.expectAssignableNodes, assignableNodes)
+			require.ElementsMatch(t, tc.expectAssignableIPs, assignableIPs)
+		})
+	}
+}
+
+func TestUpdatePod(t *testing.T) {
+	// NOTE - This also gets exercised in updateK8s and updateNode
+	tcs := []struct {
+		name                  string
+		initialIPs            map[string]string
+		updates               []metav1.Object
+		expectAssignableNodes []string
+		expectIPs             map[string]string
+		expectAssignableIPs   []string
+	}{
+		{
+			name: "pod makes node assignable",
+			updates: []metav1.Object{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			expectAssignableNodes: []string{"rio-grande"},
+			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
+		},
+		{
+			name: "pod not-ready causes node to no longer match",
+			updates: []metav1.Object{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				makePod("benjamin-sisko", "rio-grande",
+					markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			expectAssignableNodes: []string{},
+			initialIPs: map[string]string{ // Mark the IP as already attached
+				"mock://1": "172.16.2.2",
+			},
+			// Node should have IP, but it should be assignable since it doesn't match
+			expectIPs: map[string]string{
+				"rio-grande": "172.16.2.2",
+			},
+			expectAssignableIPs: []string{"192.168.1.1", "172.16.2.2"},
+		},
+	}
+	for _, tc := range tcs {
+		tc := tc
+
+		ctx := context.Background()
+		log := zaptest.NewLogger(t)
+
+		t.Run(tc.name, func(t *testing.T) {
+			f := &floatingIPPool{
+				client: fake.NewFakeClientWithScheme(scheme.Scheme),
+				log:    zapr.NewLogger(log),
+			}
+			providers := map[string]provider.Provider{
+				"mock": &provider.MockProvider{
+					NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
+						return tc.initialIPs[providerID], nil
+					},
+				},
+			}
+			k8s := makeFloatingIPPool()
+			f.updateK8s(ctx, k8s, providers)
+			err := f.resync(ctx) // resync w/ no nodes to initialize data structures.
+			require.NoError(t, err)
+			for _, o := range asRuntimeObjects(tc.updates) {
+				err := f.client.Create(ctx, o)
+				if apierrors.IsAlreadyExists(err) {
+					err = f.client.Update(ctx, o)
+				}
+				require.NoError(t, err)
+				switch r := o.(type) {
+				case *corev1.Pod:
+					err := f.updatePod(r)
+					require.NoError(t, err)
+				case *corev1.Node:
+					err := f.updateNode(ctx, r)
+					require.NoError(t, err)
+				default:
+					t.Fatalf("unexpected resource type: %T", o)
+				}
+			}
+			var assignableIPs, assignableNodes []string
+			for e := f.assignableIPs.Front(); e != nil; e = e.Next() {
+				assignableIPs = append(assignableIPs, e.Value.(string))
+			}
+			for _, n := range f.assignableNodes {
+				assignableNodes = append(assignableNodes, n.getName())
+			}
+			for name, ip := range tc.expectIPs {
+				n, ok := f.nodeNameToNode[name]
+				require.Truef(t, ok, "node %q does not have ip %q", name, ip)
+				require.Equal(t, ip, n.ip)
+			}
+			for name, n := range f.nodeNameToNode {
+				if _, ok := f.nodeNameToNode[name]; ok {
+					continue
+				}
+				require.Equal(t, "", n.ip)
+			}
+			require.ElementsMatch(t, tc.expectAssignableNodes, assignableNodes)
+			require.ElementsMatch(t, tc.expectAssignableIPs, assignableIPs)
 		})
 	}
 }

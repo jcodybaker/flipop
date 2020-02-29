@@ -445,7 +445,6 @@ func (f *floatingIPPool) releaseNode(n *node) {
 		return
 	}
 	ip := n.ip
-	n.ip = ""
 	f.assignableIPs.PushBack(ip)
 }
 
