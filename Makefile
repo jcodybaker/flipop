@@ -1,13 +1,12 @@
 GO_VERSION := 1.13
-KUBERNETES_VERSION := 1.16.3
+
 
 image: dev
 	docker build -t jcodybaker/flipop .
 
 dev:
-	docker build -t flipop-dev -f Dockerfile.dev \
-		--build-arg=GO_IMAGE=docker.io/golang:$(GO_VERSION)-buster \
-		--build-arg=KUBERNETES_GIT_TAG=kubernetes-$(KUBERNETES_VERSION) .
+	docker build --no-cache -t flipop-dev -f Dockerfile.dev \
+		--build-arg=GO_IMAGE=docker.io/golang:$(GO_VERSION)-buster .
 
 generate-k8s:
 	docker run -v $$(pwd):/go/src/github.com/jcodybaker/flipop/ \

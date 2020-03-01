@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/jcodybaker/flipop/pkg/controllers"
 	"github.com/jcodybaker/flipop/pkg/log"
-	"github.com/jcodybaker/wgmesh/pkg/agent"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/sirupsen/logrus"
@@ -72,7 +73,9 @@ func runMain(cmd *cobra.Command, args []string) {
 		rules.ExplicitPath = kubeconfig
 	}
 	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
-	if config != nil {
-		opts = append(opts, agent.WithLocalKubeClientConfig(config))
+	flipCtrl, err := controllers.NewFloatingIPPoolController(config, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "Failed to create Floating IP Pool controller: %s", err)
 	}
+	flipCtrl.Run(ctx, ll)
 }
