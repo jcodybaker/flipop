@@ -1,0 +1,17 @@
+ARG GO_IMAGE=docker.io/golang-buster
+ARG KUBERNETES_GIT_TAG=1.16.3
+
+FROM ${GO_IMAGE}
+
+WORKDIR /go/src/github.com/jcodybaker/flipop
+
+ENV GOPATH /go
+COPY . /go/src/github.com/jcodybaker/flipop
+
+RUN go mod download
+
+# k8s.io/code-generator 
+RUN cd /go && \
+  (GO111MODULE=off go get k8s.io/code-generator || true) && \
+  cd /go/src/k8s.io/code-generator && \
+  git checkout ${KUBERNETES_GIT_TAG}
