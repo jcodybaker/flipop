@@ -271,9 +271,17 @@ func TestUpdateNode(t *testing.T) {
 				kubeCS: kubeCSFake.NewSimpleClientset(),
 				ll:     logrus.New(),
 			}
+			providers := map[string]provider.Provider{
+				"mock": &provider.MockProvider{
+					NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
+						return tc.initialIPAssignment[providerID], nil
+					},
+				},
+			}
 			k8s := makeFloatingIPPool()
-			f.reset(ctx)
-			f.k8s = k8s
+			f.updateK8s(ctx, k8s, providers)
+			err := f.reset(ctx) // resync w/ no nodes to initialize data structures.
+			require.NoError(t, err)
 			for _, o := range asRuntimeObjects(tc.updates) {
 				err := f.client.Create(ctx, o)
 				if apierrors.IsAlreadyExists(err) {
