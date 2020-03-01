@@ -1,0 +1,14 @@
+apiVersion: flipop.codybaker.com/v1alpha1
+kind: FloatingIPPool
+metadata:
+  name: floatingippools.flipop.codybaker.com
+spec: 
+  provider: digitalocean
+  region: nyc3
+  ips:
+  - 192.168.1.1
+  - 172.16.2.2
+  match:
+    podNamespace: ingress
+    podLabel: app=nginx-ingress,component=controller
+    nodeLabel: doks.digitalocean.com/node-pool=ingress

@@ -66,7 +66,7 @@ type Target struct {
 
 // FloatingIPPoolStatus defines the observed state of FloatingIPPool.
 type FloatingIPPoolStatus struct {
-	IPs   map[string]IPStatus `json:"attached,omitempty"`
+	IPs   map[string]IPStatus `json:"ips,omitempty"`
 	Error string              `json:"error,omitempty"`
 }
 
