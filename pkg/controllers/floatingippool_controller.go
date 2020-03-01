@@ -643,7 +643,7 @@ func (f *floatingIPPool) isNodeMatch(n *node) bool {
 		return false
 	}
 
-	if !f.nodeSelector.Matches(labels.Set(n.k8s.Labels)) {
+	if f.nodeSelector != nil && !f.nodeSelector.Matches(labels.Set(n.k8s.Labels)) {
 		return false
 	}
 

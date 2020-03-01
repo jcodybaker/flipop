@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/cache"
 
 	flipCSFake "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/fake"
 
@@ -31,8 +32,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 		expectAssignableIPs   int
 		expectAssignableNodes int
 		expectIPAssignment    map[string]string // expect a specific node to have a specific ip
-		expectPrimed          bool
-		eval                  func(t *testing.T, f *floatingIPPool)
 	}{
 		{
 			name: "happy path",
@@ -48,7 +47,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			},
 			expectAssignedIPs:   1,
 			expectAssignableIPs: 1,
-			expectPrimed:        true,
 		},
 		{
 			name: "already has ip",
@@ -70,7 +68,21 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			},
 			expectAssignedIPs:   1,
 			expectAssignableIPs: 1,
-			expectPrimed:        true,
+		},
+		{
+			name: "no node selector",
+			objs: []metav1.Object{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				makeNode("ganges", "mock://2", markReady), // should be ignored
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				makePod("worf", "ganges",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.Match.NodeLabel = ""
+			},
+			expectAssignedIPs: 2,
 		},
 		{
 			name: "bad pod matches",
@@ -89,7 +101,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 					markReady, setNamespace("star-fleet")),
 			},
 			expectAssignableIPs: 2,
-			expectPrimed:        true,
 		},
 		{
 			name: "no pod constraints",
@@ -105,7 +116,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			},
 			expectAssignedIPs:   1,
 			expectAssignableIPs: 1,
-			expectPrimed:        true,
 		},
 		{
 			name: "IP needs to be reassigned",
@@ -132,7 +142,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			},
 			expectAssignableNodes: 1, // We have 3 matching nodes, but only 2 ips, one has to wait.
 			expectAssignedIPs:     2,
-			expectPrimed:          true,
 		},
 	}
 	for _, tc := range tcs {
@@ -163,8 +172,8 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 							}
 							return "", nil
 						},
-						AssignIPFunc: func(ctx context.Context, ip, provider string) error {
-							ipAssignment[ip] = provider
+						AssignIPFunc: func(ctx context.Context, ip, providerID string) error {
+							ipAssignment[ip] = providerID
 							return nil
 						},
 					},
@@ -179,7 +188,6 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			require.True(t, ok)
 			require.NotNil(t, f.k8s)
 			require.Empty(t, f.k8s.Status.Error)
-			require.Equal(t, tc.expectPrimed, f.primed)
 
 			cancel()
 			f.wg.Wait()
@@ -196,17 +204,21 @@ func TestUpdateNode(t *testing.T) {
 	// NOTE - This also gets exercised in updateK8s
 	tcs := []struct {
 		name                  string
+		pods                  []*corev1.Pod
 		initialIPAssignment   map[string]string
-		updates               []metav1.Object
+		updates               []*corev1.Node
+		manip                 func(*flipopv1alpha1.FloatingIPPool)
 		expectAssignableNodes []string
 		expectIPs             map[string]string
 		expectAssignableIPs   []string
 	}{
 		{
 			name: "initial update ready",
-			updates: []metav1.Object{
+			pods: []*corev1.Pod{
 				makePod("benjamin-sisko", "rio-grande",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			updates: []*corev1.Node{
 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
 			},
 			expectAssignableNodes: []string{"rio-grande"},
@@ -214,19 +226,37 @@ func TestUpdateNode(t *testing.T) {
 		},
 		{
 			name: "initial update not-ready",
-			updates: []metav1.Object{
-				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+			pods: []*corev1.Pod{
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			updates: []*corev1.Node{
+				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)),
 			},
 			expectAssignableNodes: []string{},
 			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
 		},
 		{
+			name: "initial update no pod match",
+			updates: []*corev1.Node{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+			},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.Match.PodNamespace = ""
+				f.Spec.Match.PodLabel = ""
+			},
+			expectAssignableNodes: []string{"rio-grande"},
+			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
+		},
+		{
 			name: "update from not-ready to ready",
-			updates: []metav1.Object{
+			pods: []*corev1.Pod{
 				makePod("benjamin-sisko", "rio-grande",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
 				makePod("worf", "orinoco",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			updates: []*corev1.Node{
 				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not yet ready
 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
 			},
@@ -241,11 +271,13 @@ func TestUpdateNode(t *testing.T) {
 		},
 		{
 			name: "update from ready to not-ready",
-			updates: []metav1.Object{
+			pods: []*corev1.Pod{
 				makePod("benjamin-sisko", "rio-grande",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
 				makePod("worf", "orinoco",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			updates: []*corev1.Node{
 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
 				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not ready
 			},
@@ -264,35 +296,50 @@ func TestUpdateNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		defer cancel()
 
 		t.Run(tc.name, func(t *testing.T) {
 			f := &floatingIPPool{
-				kubeCS: kubeCSFake.NewSimpleClientset(),
-				ll:     logrus.New(),
-			}
-			providers := map[string]provider.Provider{
-				"mock": &provider.MockProvider{
-					NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
-						return tc.initialIPAssignment[providerID], nil
-					},
-				},
+				ll: logrus.New(),
 			}
 			k8s := makeFloatingIPPool()
-			f.updateK8s(ctx, k8s, providers)
-			err := f.reset(ctx) // resync w/ no nodes to initialize data structures.
-			require.NoError(t, err)
-			for _, o := range asRuntimeObjects(tc.updates) {
-				err := f.client.Create(ctx, o)
-				if apierrors.IsAlreadyExists(err) {
-					err = f.client.Update(ctx, o)
-				}
-				require.NoError(t, err)
-				if n, ok := o.(*corev1.Node); ok {
-					err := f.updateNode(ctx, n)
-					require.NoError(t, err)
-				}
+			if tc.manip != nil {
+				tc.manip(k8s)
 			}
+			f.k8s = k8s
+			var err error
+			f.reset(ctx)
+
+			// These definitions get parsed in updateOrAdd, which we don't run because its tested
+			// elsewhere and adds a lot of dependencies.
+			if f.k8s.Spec.Match.NodeLabel != "" {
+				f.nodeSelector, err = labels.Parse(f.k8s.Spec.Match.NodeLabel)
+				require.NoError(t, err)
+			}
+			if f.k8s.Spec.Match.PodLabel != "" {
+				f.podSelector, err = labels.Parse(f.k8s.Spec.Match.PodLabel)
+				require.NoError(t, err)
+			}
+
+			f.provider = &provider.MockProvider{
+				NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
+					return tc.initialIPAssignment[providerID], nil
+				},
+			}
+
+			f.podIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+				podNodeNameIndexerName: podNodeNameIndexer,
+			})
+			for _, p := range tc.pods {
+				f.podIndexer.Add(p)
+			}
+
+			for _, n := range tc.updates {
+				err := f.updateNode(ctx, n)
+				require.NoError(t, err)
+			}
+
 			var assignableIPs, assignableNodes []string
 			for e := f.assignableIPs.Front(); e != nil; e = e.Next() {
 				assignableIPs = append(assignableIPs, e.Value.(string))
@@ -317,107 +364,106 @@ func TestUpdateNode(t *testing.T) {
 	}
 }
 
-// func TestUpdatePod(t *testing.T) {
-// 	// NOTE - This also gets exercised in updateK8s and updateNode
-// 	tcs := []struct {
-// 		name                  string
-// 		initialIPAssignment            map[string]string
-// 		updates               []metav1.Object
-// 		expectAssignableNodes []string
-// 		expectIPs             map[string]string
-// 		expectAssignableIPs   []string
-// 	}{
-// 		{
-// 			name: "pod makes node assignable",
-// 			updates: []metav1.Object{
-// 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
-// 				makePod("benjamin-sisko", "rio-grande",
-// 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-// 			},
-// 			expectAssignableNodes: []string{"rio-grande"},
-// 			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
-// 		},
-// 		{
-// 			name: "pod not-ready causes node to no longer match",
-// 			updates: []metav1.Object{
-// 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
-// 				makePod("benjamin-sisko", "rio-grande",
-// 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-// 				makePod("benjamin-sisko", "rio-grande",
-// 					markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-// 			},
-// 			expectAssignableNodes: []string{},
-// 			initialIPAssignment: map[string]string{ // Mark the IP as already attached
-// 				"mock://1": "172.16.2.2",
-// 			},
-// 			// Node should have IP, but it should be assignable since it doesn't match
-// 			expectIPs: map[string]string{
-// 				"rio-grande": "172.16.2.2",
-// 			},
-// 			expectAssignableIPs: []string{"192.168.1.1", "172.16.2.2"},
-// 		},
-// 	}
-// 	for _, tc := range tcs {
-// 		tc := tc
+func TestUpdatePod(t *testing.T) {
+	// NOTE - This also gets exercised in updateK8s and updateNode
+	tcs := []struct {
+		name                  string
+		initialIPAssignment   map[string]string
+		updates               []*corev1.Pod
+		manip                 func(*flipopv1alpha1.FloatingIPPool)
+		expectAssignableNodes []string
+		expectIPs             map[string]string
+		expectAssignableIPs   []string
+	}{
+		{
+			name: "pod makes node assignable",
+			updates: []*corev1.Pod{
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			expectAssignableNodes: []string{"rio-grande"},
+			expectAssignableIPs:   []string{"192.168.1.1", "172.16.2.2"},
+		},
+		{
+			name: "pod not-ready causes node to no longer match",
+			updates: []*corev1.Pod{
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				makePod("benjamin-sisko", "rio-grande",
+					markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			expectAssignableNodes: []string{},
+			initialIPAssignment: map[string]string{ // Mark the IP as already attached
+				"mock://1": "172.16.2.2",
+			},
+			// Node should have IP, but it should be assignable since it doesn't match
+			expectIPs: map[string]string{
+				"rio-grande": "172.16.2.2",
+			},
+			expectAssignableIPs: []string{"192.168.1.1", "172.16.2.2"},
+		},
+	}
+	for _, tc := range tcs {
+		tc := tc
 
-// 		ctx := context.Background()
+		ctx := context.Background()
 
-// 		t.Run(tc.name, func(t *testing.T) {
-// 			f := &floatingIPPool{
-// 				kubeCS: kubeCSFake.NewSimpleClientset(),
-// 				ll:     logrus.New(),
-// 			}
-// 			providers := map[string]provider.Provider{
-// 				"mock": &provider.MockProvider{
-// 					NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
-// 						return tc.initialIPAssignment[providerID], nil
-// 					},
-// 				},
-// 			}
-// 			k8s := makeFloatingIPPool()
-// 			f.updateK8s(ctx, k8s, providers)
-// 			err := f.resync(ctx) // resync w/ no nodes to initialize data structures.
-// 			require.NoError(t, err)
-// 			for _, o := range asRuntimeObjects(tc.updates) {
-// 				err := f.client.Create(ctx, o)
-// 				if apierrors.IsAlreadyExists(err) {
-// 					err = f.client.Update(ctx, o)
-// 				}
-// 				require.NoError(t, err)
-// 				switch r := o.(type) {
-// 				case *corev1.Pod:
-// 					err := f.updatePod(r)
-// 					require.NoError(t, err)
-// 				case *corev1.Node:
-// 					err := f.updateNode(ctx, r)
-// 					require.NoError(t, err)
-// 				default:
-// 					t.Fatalf("unexpected resource type: %T", o)
-// 				}
-// 			}
-// 			var assignableIPs, assignableNodes []string
-// 			for e := f.assignableIPs.Front(); e != nil; e = e.Next() {
-// 				assignableIPs = append(assignableIPs, e.Value.(string))
-// 			}
-// 			for _, n := range f.assignableNodes {
-// 				assignableNodes = append(assignableNodes, n.getName())
-// 			}
-// 			for name, ip := range tc.expectIPs {
-// 				n, ok := f.nodeNameToNode[name]
-// 				require.Truef(t, ok, "node %q does not have ip %q", name, ip)
-// 				require.Equal(t, ip, n.ip)
-// 			}
-// 			for name, n := range f.nodeNameToNode {
-// 				if _, ok := f.nodeNameToNode[name]; ok {
-// 					continue
-// 				}
-// 				require.Equal(t, "", n.ip)
-// 			}
-// 			require.ElementsMatch(t, tc.expectAssignableNodes, assignableNodes)
-// 			require.ElementsMatch(t, tc.expectAssignableIPs, assignableIPs)
-// 		})
-// 	}
-// }
+		t.Run(tc.name, func(t *testing.T) {
+			f := &floatingIPPool{
+				ll: logrus.New(),
+			}
+			k8s := makeFloatingIPPool()
+			if tc.manip != nil {
+				tc.manip(k8s)
+			}
+			f.k8s = k8s
+			var err error
+			f.reset(ctx)
+
+			// These definitions get parsed in updateOrAdd, which we don't run because its tested
+			// elsewhere and adds a lot of dependencies.
+			if f.k8s.Spec.Match.PodLabel != "" {
+				f.podSelector, err = labels.Parse(f.k8s.Spec.Match.PodLabel)
+				require.NoError(t, err)
+			}
+			f.podIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+				podNodeNameIndexerName: podNodeNameIndexer, // Necessary for updateNode used in setup
+			})
+			f.provider = &provider.MockProvider{
+				NodeToIPFunc: func(ctx context.Context, providerID string) (string, error) {
+					return tc.initialIPAssignment[providerID], nil
+				},
+			}
+			err = f.updateNode(ctx, makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)))
+			require.NoError(t, err)
+
+			for _, p := range tc.updates {
+				f.updatePod(p)
+			}
+
+			var assignableIPs, assignableNodes []string
+			for e := f.assignableIPs.Front(); e != nil; e = e.Next() {
+				assignableIPs = append(assignableIPs, e.Value.(string))
+			}
+			for _, n := range f.assignableNodes {
+				assignableNodes = append(assignableNodes, n.getName())
+			}
+			for name, ip := range tc.expectIPs {
+				n, ok := f.nodeNameToNode[name]
+				require.Truef(t, ok, "node %q does not have ip %q", name, ip)
+				require.Equal(t, ip, n.ip)
+			}
+			for name, n := range f.nodeNameToNode {
+				if _, ok := f.nodeNameToNode[name]; ok {
+					continue
+				}
+				require.Equal(t, "", n.ip)
+			}
+			require.ElementsMatch(t, tc.expectAssignableNodes, assignableNodes)
+			require.ElementsMatch(t, tc.expectAssignableIPs, assignableIPs)
+		})
+	}
+}
 
 var matchingPodLabels = labels.Set(map[string]string{
 	"vessel": "runabout",
@@ -451,7 +497,7 @@ func setTaints(t []corev1.Taint) func(metav1.Object) metav1.Object {
 	}
 }
 
-func makePod(name, nodeName string, manipulations ...func(pod metav1.Object) metav1.Object) metav1.Object {
+func makePod(name, nodeName string, manipulations ...func(pod metav1.Object) metav1.Object) *corev1.Pod {
 	var p metav1.Object = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -477,10 +523,10 @@ func makePod(name, nodeName string, manipulations ...func(pod metav1.Object) met
 	for _, f := range manipulations {
 		p = f(p)
 	}
-	return p
+	return p.(*corev1.Pod)
 }
 
-func makeNode(name, providerID string, manipulations ...func(node metav1.Object) metav1.Object) metav1.Object {
+func makeNode(name, providerID string, manipulations ...func(node metav1.Object) metav1.Object) *corev1.Node {
 	var n metav1.Object = &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -506,7 +552,7 @@ func makeNode(name, providerID string, manipulations ...func(node metav1.Object)
 	for _, f := range manipulations {
 		n = f(n)
 	}
-	return n
+	return n.(*corev1.Node)
 }
 
 func makeFloatingIPPool() *flipopv1alpha1.FloatingIPPool {
