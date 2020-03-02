@@ -81,6 +81,7 @@ type FloatingIPPoolController struct {
 func NewFloatingIPPoolController(kubeConfig clientcmd.ClientConfig, providers map[string]provider.Provider) (*FloatingIPPoolController, error) {
 	c := &FloatingIPPoolController{
 		providers: providers,
+		pools:     make(map[string]*floatingIPPool),
 	}
 	var err error
 	clientConfig, err := kubeConfig.ClientConfig()
@@ -138,7 +139,10 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 		pool.ll.Info("FloatingIPPool added; beginning reconciliation")
 		c.pools[k8sPool.GetSelfLink()] = pool
 	}
-	specChange := !reflect.DeepEqual(pool.k8s, k8sPool)
+	specChange := true
+	if pool.k8s != nil {
+		specChange = !reflect.DeepEqual(&pool.k8s.Spec, &k8sPool.Spec)
+	}
 	pool.k8s = k8sPool.DeepCopy()
 	if !specChange {
 		return // nothing to do
@@ -387,12 +391,20 @@ func (f *floatingIPPool) assign(ctx context.Context) error {
 		e := f.assignableIPs.Front()
 		ip := e.Value.(string)
 		ll = ll.WithField("ip", ip)
+
 		ll.Info("assigning ip to node")
 		err := f.provider.AssignIP(ctx, ip, n.getProviderID())
 		if err != nil {
 			// This error might be with the node (ex. already has an IP or a pending action)
-			ll.Error(err, "assigning ip to node")
+			ll.WithError(err).Error("assigning ip to node")
 			return err
+		}
+
+		if oldNode, ok := f.ipToNode[ip]; ok {
+			// This IP is assigned with the provider to oldNode. The node record holds a reference
+			// to the IP so it could reclaim the IP w/o needing a provider API call.
+			// Remove that claim.
+			oldNode.ip = ""
 		}
 		n.ip = ip
 		f.assignableIPs.Remove(e)
@@ -408,14 +420,15 @@ func (f *floatingIPPool) deleteNode(k8s *corev1.Node) {
 		return
 	}
 	ip := n.ip
-	f.releaseNode(n)
+	if n.isNodeMatch && ((f.k8s.Spec.Match.PodNamespace == "" && f.podSelector == nil) || (len(n.matchingPods) > 0)) {
+		f.releaseNode(n)
+	}
 	delete(f.nodeNameToNode, n.getName())
 	delete(f.ipToNode, ip)
 	return
 }
 
 func (f *floatingIPPool) updateNode(ctx context.Context, k8s *corev1.Node) error {
-	// TODO - should this return an error?
 	if !k8s.ObjectMeta.DeletionTimestamp.IsZero() {
 		f.deleteNode(k8s)
 		return nil
@@ -435,6 +448,7 @@ func (f *floatingIPPool) updateNode(ctx context.Context, k8s *corev1.Node) error
 			return err
 		}
 		if ip != "" {
+			ll.WithField("ip", ip).Info("provider reports node already has floating ip")
 			delete(f.ipToError, ip)
 			oldNode, isIPKnown := f.ipToNode[ip]
 			if isIPKnown {
@@ -445,6 +459,8 @@ func (f *floatingIPPool) updateNode(ctx context.Context, k8s *corev1.Node) error
 				f.ipToNode[ip] = n
 				n.ip = ip
 			}
+		} else {
+			ll.Info("provider reports node has no floating IP")
 		}
 	} else {
 		n.k8s = k8s
@@ -457,14 +473,14 @@ func (f *floatingIPPool) updateNode(ctx context.Context, k8s *corev1.Node) error
 	var oldNodeMatch = n.isNodeMatch
 	n.isNodeMatch = f.isNodeMatch(n)
 
-	if n.isNodeMatch && len(n.matchingPods) > 0 {
-		// We stop tracking pods when the node doesn't match.
-		n.matchingPods = make(map[string]*corev1.Pod)
-	}
-
 	if oldNodeMatch == n.isNodeMatch {
 		ll.Debug("node match unchanged")
 		return nil
+	}
+
+	if n.isNodeMatch && len(n.matchingPods) > 0 {
+		// We stop tracking pods when the node doesn't match.
+		n.matchingPods = make(map[string]*corev1.Pod)
 	}
 
 	if n.isNodeMatch {
@@ -562,7 +578,12 @@ func (f *floatingIPPool) deletePod(pod *corev1.Pod) {
 	if !ok {
 		return
 	}
-	delete(n.matchingPods, podNamespacedName(pod))
+	podKey := podNamespacedName(pod)
+	_, ok = n.matchingPods[podKey]
+	if !ok {
+		return // already gone
+	}
+	delete(n.matchingPods, podKey)
 	if len(n.matchingPods) == 0 {
 		f.releaseNode(n)
 	}
@@ -627,7 +648,7 @@ func (f *floatingIPPool) setStatus(ctx context.Context, errMsg string) error {
 	// have not yet been reconciled.
 	_, err := f.flipopCS.FlipopV1alpha1().FloatingIPPools(f.k8s.Namespace).UpdateStatus(f.k8s)
 	if err != nil {
-		f.ll.WithError(err).Error("failed to update status")
+		f.ll.WithError(err).WithField("namespace", f.k8s.Namespace).Error("failed to update status")
 	}
 	return err
 }
@@ -729,5 +750,5 @@ func (n *node) getProviderID() string {
 }
 
 func podNamespacedName(pod *corev1.Pod) string {
-	return fmt.Sprintf("%s/%s", pod.Name, pod.Namespace)
+	return fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 }

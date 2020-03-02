@@ -13,6 +13,10 @@ import (
 	"golang.org/x/oauth2"
 )
 
+const (
+	DigitalOcean = "digitalocean"
+)
+
 type digitalOcean struct {
 	*godo.Client
 }
@@ -29,14 +33,18 @@ func (t *doTokenSource) Token() (*oauth2.Token, error) {
 }
 
 // NewDigitalOcean returns a new provider for DigitalOcean.
-func NewDigitalOcean() (Provider, error) {
+func NewDigitalOcean() Provider {
+	token := os.Getenv("DIGITALOCEAN_ACCESS_TOKEN")
+	if token == "" {
+		return nil
+	}
 	tokenSource := &doTokenSource{
-		AccessToken: os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"),
+		AccessToken: token,
 	}
 
 	oauthClient := oauth2.NewClient(context.Background(), tokenSource)
 	client := godo.NewClient(oauthClient)
-	return &digitalOcean{client}, nil
+	return &digitalOcean{client}
 }
 
 func (do *digitalOcean) IPtoProviderID(ctx context.Context, ip string) (string, error) {
@@ -60,8 +68,21 @@ func (do *digitalOcean) AssignIP(ctx context.Context, ip, providerID string) err
 	}
 	_, res, err := do.FloatingIPActions.Assign(ctx, ip, int(dropletID))
 	if err != nil {
-		if res != nil && res.StatusCode == http.StatusNotFound {
-			return ErrNotFound
+		if res != nil {
+			if res.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			if res.StatusCode == http.StatusUnprocessableEntity {
+				// Typically this means the droplet already has a Floating IP. We will get this
+				// error even if we try to assign it the IP it already has.
+
+				// Check the IP's current provider.  If this fails, eat the error and return the
+				// assign error.
+				curProvider, _ := do.IPtoProviderID(ctx, ip)
+				if curProvider != "" && curProvider == providerID {
+					return nil // Already set to us. This is success.
+				}
+			}
 		}
 		return err
 	}

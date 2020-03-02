@@ -9,6 +9,7 @@ import (
 
 	"github.com/jcodybaker/flipop/pkg/controllers"
 	"github.com/jcodybaker/flipop/pkg/log"
+	"github.com/jcodybaker/flipop/pkg/provider"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/sirupsen/logrus"
@@ -73,9 +74,24 @@ func runMain(cmd *cobra.Command, args []string) {
 		rules.ExplicitPath = kubeconfig
 	}
 	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{})
-	flipCtrl, err := controllers.NewFloatingIPPoolController(config, nil)
+	providers := initProviders()
+	if len(providers) == 0 {
+		fmt.Fprintf(os.Stdout, "No providers initialized. Set DIGITALOCEAN_ACCESS_TOKEN\n")
+		os.Exit(1)
+	}
+	flipCtrl, err := controllers.NewFloatingIPPoolController(config, providers)
 	if err != nil {
-		fmt.Fprintf(os.Stdout, "Failed to create Floating IP Pool controller: %s", err)
+		fmt.Fprintf(os.Stdout, "Failed to create Floating IP Pool controller: %s\n", err)
+		os.Exit(1)
 	}
 	flipCtrl.Run(ctx, ll)
+}
+
+func initProviders() map[string]provider.Provider {
+	out := make(map[string]provider.Provider)
+	do := provider.NewDigitalOcean()
+	if do != nil {
+		out[provider.DigitalOcean] = do
+	}
+	return out
 }
