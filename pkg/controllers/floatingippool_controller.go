@@ -78,10 +78,11 @@ type FloatingIPPoolController struct {
 }
 
 // NewFloatingIPPoolController creates a new FloatingIPPoolController.
-func NewFloatingIPPoolController(kubeConfig clientcmd.ClientConfig, providers map[string]provider.Provider) (*FloatingIPPoolController, error) {
+func NewFloatingIPPoolController(kubeConfig clientcmd.ClientConfig, providers map[string]provider.Provider, ll logrus.FieldLogger) (*FloatingIPPoolController, error) {
 	c := &FloatingIPPoolController{
 		providers: providers,
 		pools:     make(map[string]*floatingIPPool),
+		ll:        ll,
 	}
 	var err error
 	clientConfig, err := kubeConfig.ClientConfig()
@@ -100,12 +101,17 @@ func NewFloatingIPPoolController(kubeConfig clientcmd.ClientConfig, providers ma
 }
 
 // Run watches for FloatingIPPools and reconciles their state into reality.
-func (c *FloatingIPPoolController) Run(ctx context.Context, ll logrus.FieldLogger) {
-	c.ll = ll
+func (c *FloatingIPPoolController) Run(ctx context.Context) {
 	informer := flipopInformers.NewFloatingIPPoolInformer(c.flipopCS, "", floatingIPPoolResyncPeriod, cache.Indexers{})
 	informer.AddEventHandler(c)
 	c.ctx = ctx
 	informer.Run(ctx.Done())
+	c.poolLock.Lock()
+	for _, f := range c.pools {
+		// Our parent's canceling of the context should stop all of the children concurrently.
+		// This loop just verifies all children have completed.
+		f.stop()
+	}
 }
 
 // OnAdd implements the shared informer ResourceEventHandler for FloatingIPPools.

@@ -10,6 +10,7 @@ import (
 	"github.com/jcodybaker/flipop/pkg/controllers"
 	"github.com/jcodybaker/flipop/pkg/log"
 	"github.com/jcodybaker/flipop/pkg/provider"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/sirupsen/logrus"
@@ -17,6 +18,10 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+)
+
+const (
+	leaderElectionResource = "floating-ip-pool-controller-leader-election"
 )
 
 var debug bool
@@ -79,12 +84,23 @@ func runMain(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stdout, "No providers initialized. Set DIGITALOCEAN_ACCESS_TOKEN\n")
 		os.Exit(1)
 	}
-	flipCtrl, err := controllers.NewFloatingIPPoolController(config, providers)
+	flipCtrl, err := controllers.NewFloatingIPPoolController(config, providers, ll)
 	if err != nil {
 		fmt.Fprintf(os.Stdout, "Failed to create Floating IP Pool controller: %s\n", err)
 		os.Exit(1)
 	}
-	flipCtrl.Run(ctx, ll)
+	ns, _, err := config.Namespace()
+	clientConfig, err := config.ClientConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "building kubernetes client config: %s\n", err)
+		os.Exit(1)
+	}
+	kubeCS, err := kubernetes.NewForConfig(clientConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stdout, "creating kubernetes client: %s\n", err)
+		os.Exit(1)
+	}
+	controllers.LeaderElection(ctx, ll, ns, leaderElectionResource, kubeCS, flipCtrl.Run)
 }
 
 func initProviders() map[string]provider.Provider {
