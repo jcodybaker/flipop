@@ -141,10 +141,10 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 		c.pools[k8sPool.GetSelfLink()] = pool
 	}
 	specChange := true
-	if pool.k8s != nil {
-		specChange = !reflect.DeepEqual(&pool.k8s.Spec, &k8sPool.Spec)
+	if pool.match != nil {
+		specChange = !reflect.DeepEqual(&pool.match, &k8sPool.Spec.Match)
 	}
-	pool.k8s = k8sPool.DeepCopy()
+	pool.match = k8sPool.Spec.Match.DeepCopy()
 	if !specChange {
 		return // nothing to do
 	}
@@ -158,11 +158,11 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 
 	pool.reset(c.ctx)
 
-	prov := c.providers[pool.k8s.Spec.Provider]
+	prov := c.providers[k8sPool.Spec.Provider]
 	if prov == nil {
-		pool.ll.WithFields(logrus.Fields{"provider": pool.k8s.Spec.Provider}).
+		pool.ll.WithFields(logrus.Fields{"provider": k8sPool.Spec.Provider}).
 			Error("FloatingIPPool referenced unknown provider")
-		pool.setStatus(pool.ctx, fmt.Sprintf("unknown provider %q", pool.k8s.Spec.Provider))
+		pool.setStatus(pool.ctx, fmt.Sprintf("unknown provider %q", k8sPool.Spec.Provider))
 		return
 	}
 	// TODO
@@ -170,8 +170,8 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 	var err error
 	pool.nodeSelector = nil
 
-	if pool.k8s.Spec.Match.NodeLabel != "" {
-		pool.nodeSelector, err = labels.Parse(pool.k8s.Spec.Match.NodeLabel)
+	if pool.match.NodeLabel != "" {
+		pool.nodeSelector, err = labels.Parse(pool.match.NodeLabel)
 		if err != nil {
 			pool.ll.WithError(err).Error("parsing node selector")
 			pool.setStatus(pool.ctx, fmt.Sprintf("parsing node selector: %s", err))
@@ -180,8 +180,8 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 	}
 
 	pool.podSelector = nil
-	if pool.k8s.Spec.Match.PodLabel != "" {
-		pool.podSelector, err = labels.Parse(pool.k8s.Spec.Match.PodLabel)
+	if pool.match.PodLabel != "" {
+		pool.podSelector, err = labels.Parse(pool.match.PodLabel)
 		if err != nil {
 			pool.ll.WithError(err).Error("parsing pod selector")
 			pool.setStatus(pool.ctx, fmt.Sprintf("parsing pod selector: %s", err))

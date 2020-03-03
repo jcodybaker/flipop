@@ -6,17 +6,16 @@ import (
 	"fmt"
 	"sync"
 
-	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
 	"github.com/sirupsen/logrus"
+
+	flipopCS "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
+	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	flipopCS "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
-
-	// k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1Informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
@@ -172,7 +171,7 @@ func (m *matchController) getNodePods(nodeName string) ([]*corev1.Pod, error) {
 
 func (m *matchController) deleteNode(k8sNode *corev1.Node) {
 	m.action.Disable(k8sNode)
-	delete(m.nodeNameToNode, n.getName())
+	delete(m.nodeNameToNode, k8sNode.Name)
 	return
 }
 
@@ -219,9 +218,9 @@ func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) 
 			}
 			return nil // updatePod will enable the node if appropriate
 		}
-		m.action.Enable(n)
+		m.action.Enable(n.k8sNode)
 	} else {
-		m.action.Disable(n)
+		m.action.Disable(n.k8sNode)
 	}
 	return nil
 }
@@ -284,12 +283,12 @@ func (m *matchController) updatePod(pod *corev1.Pod) error {
 	if ready && running {
 		n.matchingPods[podKey] = pod.DeepCopy()
 		if len(n.matchingPods) == 1 {
-			m.action.Enable(n)
+			m.action.Enable(n.k8sNode)
 		}
 	} else {
 		delete(n.matchingPods, podKey)
 		if len(n.matchingPods) == 0 {
-			m.action.Disable(n)
+			m.action.Disable(n.k8sNode)
 		}
 	}
 	return nil
@@ -306,7 +305,7 @@ func (m *matchController) deletePod(pod *corev1.Pod) {
 	podKey := podNamespacedName(pod)
 	delete(n.matchingPods, podKey)
 	if len(n.matchingPods) == 0 {
-		m.action.Disable(n)
+		m.action.Disable(n.k8sNode)
 	}
 }
 
