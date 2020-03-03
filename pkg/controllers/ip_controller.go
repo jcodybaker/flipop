@@ -275,6 +275,9 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 		if ctx.Err() != nil {
 			return // short-circuit on context cancel.
 		}
+
+		// TODO - Do we need to delay until we know known provider ids?
+
 		providerID := i.assignableNodes.Front()
 		ip := i.assignableIPs.Front()
 
@@ -338,6 +341,7 @@ func (i *ipController) EnableNode(node *corev1.Node) {
 	i.poke <- struct{}{}
 	i.providerIDToNodeName[providerID] = node.Name
 	if _, ok := i.providerIDToIP[providerID]; ok {
+		// TODO - register for immediate recheck.
 		return // Already has an IP.
 	}
 	i.assignableNodes.Add(providerID, false)
