@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/jcodybaker/flipop/pkg/controllers"
+	"github.com/jcodybaker/flipop/pkg/leaderelection"
 	"github.com/jcodybaker/flipop/pkg/log"
 	"github.com/jcodybaker/flipop/pkg/provider"
 	"k8s.io/client-go/kubernetes"
