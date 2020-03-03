@@ -7,11 +7,10 @@ import (
 
 var (
 	// ErrNotFound wraps provider specific not found errors.
-	ErrNotFound = errors.New("not found")
+	ErrNotFound = newRetryError(errors.New("not found"), RetrySlow)
 
-	// ErrNodeHasIP is returned if the address cannot be assigned because
-	// it already has a Floating IP assigned.
-	ErrNodeHasIP = errors.New("node already has Floating IP")
+	// ErrInProgress is returned if the action is in-progress, but otherwise unerrored.
+	ErrInProgress = newRetryError(errors.New("action in progress"), RetrySlow)
 )
 
 // Provider defines a platform which offers kubernetes VMs and floating ips.
@@ -19,4 +18,5 @@ type Provider interface {
 	IPtoProviderID(ctx context.Context, ip string) (string, error)
 	AssignIP(ctx context.Context, ip, providerID string) error
 	NodeToIP(ctx context.Context, providerID string) (string, error)
+	CreateIP(ctx context.Context, region string) (string, error)
 }

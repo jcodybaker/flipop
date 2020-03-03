@@ -4,21 +4,35 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/digitalocean/godo"
 	"golang.org/x/oauth2"
 )
 
 const (
+	// DigitalOcean is an identifier which can be used to select the godo provider.
 	DigitalOcean = "digitalocean"
+
+	// doActionExpiration defines how long we'll hold onto an action before expiring it.
+	doActionExpiration = 1 * time.Hour
 )
+
+type doAction struct {
+	actionID int
+	expires  time.Time
+}
 
 type digitalOcean struct {
 	*godo.Client
+	lock              sync.Mutex
+	floatingIPActions map[string]*doAction
 }
 
 type doTokenSource struct {
@@ -44,10 +58,17 @@ func NewDigitalOcean() Provider {
 
 	oauthClient := oauth2.NewClient(context.Background(), tokenSource)
 	client := godo.NewClient(oauthClient)
-	return &digitalOcean{client}
+	return &digitalOcean{
+		Client:            client,
+		floatingIPActions: make(map[string]*doAction),
+	}
 }
 
 func (do *digitalOcean) IPtoProviderID(ctx context.Context, ip string) (string, error) {
+	err := do.asyncStatus(ctx, ip)
+	if err != nil {
+		return "", err
+	}
 	flip, res, err := do.FloatingIPs.Get(ctx, ip)
 	if err != nil {
 		if res != nil && res.StatusCode == http.StatusNotFound {
@@ -62,11 +83,15 @@ func (do *digitalOcean) IPtoProviderID(ctx context.Context, ip string) (string, 
 }
 
 func (do *digitalOcean) AssignIP(ctx context.Context, ip, providerID string) error {
+	err := do.asyncStatus(ctx, ip)
+	if err != nil {
+		return err
+	}
 	dropletID, err := strconv.ParseInt(strings.TrimPrefix(providerID, "digitalocean://"), 10, 0)
 	if err != nil {
 		return fmt.Errorf("parsing provider id: %w", err)
 	}
-	_, res, err := do.FloatingIPActions.Assign(ctx, ip, int(dropletID))
+	action, res, err := do.FloatingIPActions.Assign(ctx, ip, int(dropletID))
 	if err != nil {
 		if res != nil {
 			if res.StatusCode == http.StatusNotFound {
@@ -86,7 +111,53 @@ func (do *digitalOcean) AssignIP(ctx context.Context, ip, providerID string) err
 		}
 		return err
 	}
-	return nil
+	if action == nil || action.CompletedAt != nil || action.ID == 0 {
+		return nil
+	}
+	do.lock.Lock()
+	defer do.lock.Unlock()
+	do.floatingIPActions[ip] = &doAction{
+		actionID: action.ID,
+		expires:  time.Now().Add(doActionExpiration),
+	}
+	return ErrInProgress
+}
+
+func (do *digitalOcean) asyncStatus(ctx context.Context, ip string) error {
+	do.lock.Lock()
+	// clean our cache
+	now := time.Now()
+	for ip, a := range do.floatingIPActions {
+		if now.After(a.expires) {
+			delete(do.floatingIPActions, ip)
+		}
+	}
+	a := do.floatingIPActions[ip]
+	do.lock.Unlock()
+	if a == nil {
+		return nil
+	}
+	action, _, err := do.FloatingIPActions.Get(ctx, ip, a.actionID)
+	if err != nil {
+		return err
+	}
+	do.lock.Lock()
+	defer do.lock.Unlock()
+	if action == nil || action.Status == godo.ActionInProgress {
+		delete(do.floatingIPActions, ip)
+		return nil
+	}
+	return ErrInProgress
+}
+
+func (do *digitalOcean) CreateIP(ctx context.Context, region string) (string, error) {
+	flip, _, err := do.FloatingIPs.Create(ctx, &godo.FloatingIPCreateRequest{
+		Region: region,
+	})
+	if err != nil {
+		return "", err
+	}
+	return flip.IP, nil
 }
 
 func (do *digitalOcean) NodeToIP(ctx context.Context, providerID string) (string, error) {
@@ -135,4 +206,23 @@ func (do *digitalOcean) NodeToIP(ctx context.Context, providerID string) (string
 	}
 
 	return "", nil
+}
+
+func (do *digitalOcean) toRetryError(err error, res *godo.Response) error {
+	if res != nil {
+		switch res.StatusCode {
+		case http.StatusNotFound:
+			return ErrNotFound
+		case http.StatusRequestTimeout,
+			http.StatusServiceUnavailable,
+			http.StatusTooManyRequests:
+			return newRetryError(err, RetryFast)
+		}
+	}
+	if nErr, ok := err.(net.Error); ok {
+		if nErr.Temporary() {
+			return newRetryError(err, RetryFast)
+		}
+	}
+	return err
 }
