@@ -197,7 +197,18 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 		providerID, err := i.provider.IPtoProviderID(ctx, ip)
 		if err != nil {
 			if err == provider.ErrNotFound {
-
+				// If the IP's not found, try to do the best we can. We'll continue to check its
+				// status according to the retry schedule. If it recovers, it should be added back.
+				oldProviderID := status.nodeProviderID
+				status.nodeProviderID = ""
+				delete(i.providerIDToIP, oldProviderID)
+				if nodeName, ok := i.providerIDToNodeName[oldProviderID]; ok {
+					i.assignableNodes.Add(oldProviderID, true)
+					ll.WithField("node", nodeName).Error("ip not found; node will be reassigned")
+				} else {
+					ll.Error("ip not found; node will be removed from assignable")
+					i.assignableIPs.Delete(ip)
+				}
 			}
 			status.retrySchedule = provider.ErrorToRetrySchedule(err)
 			status.retries, status.nextRetry = status.retrySchedule.Next(status.retries)
