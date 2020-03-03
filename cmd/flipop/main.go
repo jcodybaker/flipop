@@ -100,7 +100,7 @@ func runMain(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stdout, "creating kubernetes client: %s\n", err)
 		os.Exit(1)
 	}
-	controllers.LeaderElection(ctx, ll, ns, leaderElectionResource, kubeCS, flipCtrl.Run)
+	leaderelection.LeaderElection(ctx, ll, ns, leaderElectionResource, kubeCS, flipCtrl.Run)
 }
 
 func initProviders() map[string]provider.Provider {
