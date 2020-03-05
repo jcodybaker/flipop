@@ -103,9 +103,17 @@ func (do *digitalOcean) AssignIP(ctx context.Context, ip, providerID string) err
 
 				// Check the IP's current provider.  If this fails, eat the error and return the
 				// assign error.
-				curProvider, _ := do.IPtoProviderID(ctx, ip)
+				curProvider, iErr := do.IPtoProviderID(ctx, ip)
 				if curProvider != "" && curProvider == providerID {
 					return nil // Already set to us. This is success.
+				}
+				if iErr == nil {
+					// It's likely the node already has an IP. Verify that, and return an
+					// appropriate error.
+					nIP, _ := do.NodeToIP(ctx, curProvider)
+					if nIP != "" {
+						return ErrNodeInUse
+					}
 				}
 			}
 		}

@@ -233,3 +233,103 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestIPControllerReconcileAssignment(t *testing.T) {
+	type assignIPRes struct {
+		ip         string
+		err        error
+		providerID string
+	}
+	tcs := []struct {
+		name                  string
+		assignableIPs         []string
+		assignableNodes       []string
+		setup                 func(i *ipController)
+		responses             []assignIPRes
+		expectProviderIDToIP  map[string]string
+		expectRetry           bool
+		expectAssignableIPs   []string
+		expectAssignableNodes []string
+		eval                  func(i *ipController)
+	}{
+		{
+			name:                 "no action",
+			expectProviderIDToIP: map[string]string{},
+		},
+		{
+			name:                 "success",
+			assignableIPs:        []string{"192.168.1.1"},
+			assignableNodes:      []string{"mock://1"},
+			expectProviderIDToIP: map[string]string{"mock://1": "192.168.1.1"},
+			responses:            []assignIPRes{{ip: "192.168.1.1", providerID: "mock://1"}},
+			expectRetry:          true, // We always retry, because of assign
+			setup: func(i *ipController) {
+				i.ipToStatus["192.168.1.1"] = &ipStatus{}
+			},
+			eval: func(i *ipController) {
+				require.Equal(t, provider.RetryFast, i.ipToStatus["192.168.1.1"].retrySchedule)
+			},
+		},
+		{
+			name:                 "assignment error",
+			assignableIPs:        []string{"192.168.1.1"},
+			assignableNodes:      []string{"mock://1"},
+			expectProviderIDToIP: map[string]string{"mock://1": "192.168.1.1"},
+			responses:            []assignIPRes{{ip: "192.168.1.1", providerID: "mock://1"}},
+			expectRetry:          true, // We always retry, because of assign
+			setup: func(i *ipController) {
+				i.ipToStatus["192.168.1.1"] = &ipStatus{}
+			},
+			eval: func(i *ipController) {
+				require.Equal(t, provider.RetrySlow, i.ipToStatus["192.168.1.1"].retrySchedule)
+			},
+		},
+	}
+	for _, tc := range tcs {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			i := newIPController(logrus.New(), &provider.MockProvider{
+				AssignIPFunc: func(_ context.Context, ip string, providerID string) error {
+					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to AssignIPFunc")
+					require.Equal(t, tc.responses[0].ip, ip)
+					require.Equal(t, tc.responses[0].providerID, providerID)
+					err := tc.responses[0].err
+					tc.responses = tc.responses[1:]
+					return err
+				},
+			}, "", nil)
+			for _, ip := range tc.assignableIPs {
+				i.assignableIPs.Add(ip, true)
+			}
+			for _, node := range tc.assignableNodes {
+				i.assignableNodes.Add(node, true)
+			}
+			if tc.setup != nil {
+				tc.setup(i)
+			}
+			i.reconcileAssignment(ctx)
+
+			require.Equal(t, tc.expectProviderIDToIP, i.providerIDToIP)
+			for providerID, ip := range tc.expectProviderIDToIP {
+				status := i.ipToStatus[ip]
+				require.NotNil(t, status)
+				require.Equal(t, providerID, status.nodeProviderID)
+			}
+
+			require.Equal(t, tc.expectRetry, i.nextRetry != time.Time{})
+			require.Equal(t, len(tc.expectAssignableIPs), i.assignableIPs.Len())
+			for _, ip := range tc.expectAssignableIPs {
+				require.True(t, i.assignableIPs.IsSet(ip))
+			}
+			for _, ip := range tc.expectAssignableIPs {
+				require.Contains(t, i.ipToStatus, ip)
+			}
+
+			require.Equal(t, len(tc.expectAssignableNodes), i.assignableNodes.Len())
+			for _, providerID := range tc.expectAssignableNodes {
+				require.True(t, i.assignableNodes.IsSet(providerID))
+			}
+		})
+	}
+}
