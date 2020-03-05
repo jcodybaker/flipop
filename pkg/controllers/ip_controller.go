@@ -136,7 +136,7 @@ func (i *ipController) reconcileDesiredIPs(ctx context.Context) {
 		return
 	}
 	// Acquire new IPs if needed. If this fails, we can try again next reconcile.
-	for j := len(i.ips) - 1; j < i.desiredIPs; j++ {
+	for j := len(i.ips); j < i.desiredIPs; j++ {
 		ip, err := i.provider.CreateIP(ctx, i.region)
 		if err != nil {
 			i.createRetrySchedule = provider.ErrorToRetrySchedule(err)
@@ -260,6 +260,15 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 				}
 			}
 			i.providerIDToIP[providerID] = ip
+
+			delete(i.providerIDToIP, expectedProviderID)
+			if evictedNodeName, ok := i.providerIDToNodeName[providerID]; ok {
+				ll.WithFields(logrus.Fields{
+					"node": evictedNodeName,
+					"ip":   expectedIP,
+				}).Info("nodes ip was claimed by other node; marking for reassignment")
+				i.assignableNodes.Add(expectedProviderID, true)
+			}
 		}
 
 		status.message = ""
@@ -302,7 +311,7 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 		err := i.provider.AssignIP(ctx, ip, providerID)
 		if err != nil {
 			status.retrySchedule = provider.ErrorToRetrySchedule(err)
-			status.message = fmt.Sprintf("assigning IP to node: %s")
+			status.message = fmt.Sprintf("assigning IP to node: %s", err)
 			ll.WithError(err).Error("assigning IP to node")
 		}
 		_, status.nextRetry = status.retrySchedule.Next(status.retries)
@@ -400,5 +409,14 @@ func (o *orderedSet) Delete(v string) bool {
 	}
 	delete(o.m, v)
 	o.l.Remove(e)
+	return true
+}
+
+// IsSet returns true if v is in the set.
+func (o *orderedSet) IsSet(v string) bool {
+	_, ok := o.m[v]
+	if !ok {
+		return false
+	}
 	return true
 }
