@@ -10,6 +10,9 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestIPControllerReconcileDesiredIPs(t *testing.T) {
@@ -25,7 +28,7 @@ func TestIPControllerReconcileDesiredIPs(t *testing.T) {
 		region           string
 		responses        []createIPRes
 		expectPendingIPs []string
-		expectRetry      bool
+		expectIPRetry    bool
 	}{
 		{
 			name:             "success",
@@ -35,11 +38,11 @@ func TestIPControllerReconcileDesiredIPs(t *testing.T) {
 			expectPendingIPs: []string{"192.168.1.2", "192.168.1.3"},
 		},
 		{
-			name:        "create fails",
-			desiredIPs:  3,
-			existingIPs: []string{"192.168.1.1"},
-			responses:   []createIPRes{{err: errors.New("nope"), region: "earth"}},
-			expectRetry: true,
+			name:          "create fails",
+			desiredIPs:    3,
+			existingIPs:   []string{"192.168.1.1"},
+			responses:     []createIPRes{{err: errors.New("nope"), region: "earth"}},
+			expectIPRetry: true,
 		},
 	}
 	for _, tc := range tcs {
@@ -64,7 +67,7 @@ func TestIPControllerReconcileDesiredIPs(t *testing.T) {
 			}
 			i.reconcileDesiredIPs(ctx)
 			require.ElementsMatch(t, tc.expectPendingIPs, i.pendingIPs)
-			require.Equal(t, tc.expectRetry, i.nextRetry != time.Time{})
+			require.Equal(t, tc.expectIPRetry, i.nextRetry != time.Time{})
 			require.Empty(t, tc.responses) // We should have used all expected responses.
 		})
 	}
@@ -109,10 +112,10 @@ func TestIPControllerReconcilePendingIPs(t *testing.T) {
 
 func TestIPControllerReconcileIPStatus(t *testing.T) {
 	type ipToProviderIDRes struct {
-		ip          string
-		err         error
-		providerID  string
-		expectRetry bool
+		ip            string
+		err           error
+		providerID    string
+		expectIPRetry bool
 	}
 	tcs := []struct {
 		name                  string
@@ -120,7 +123,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 		responses             []ipToProviderIDRes
 		setup                 func(i *ipController)
 		expectProviderIDToIP  map[string]string
-		expectRetry           bool
+		expectIPRetry         bool
 		expectAssignableIPs   []string
 		expectAssignableNodes []string
 	}{
@@ -146,7 +149,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 					nodeProviderID: "mock://1",
 				}
 			},
-			expectRetry: true,
+			expectIPRetry: true,
 		},
 		{
 			name:      "ip not found",
@@ -159,7 +162,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 				}
 				i.providerIDToNodeName["mock://1"] = "some-node"
 			},
-			expectRetry:           true,
+			expectIPRetry:         true,
 			expectProviderIDToIP:  map[string]string{},
 			expectAssignableIPs:   []string{},
 			expectAssignableNodes: []string{"mock://1"},
@@ -184,7 +187,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 				i.providerIDToNodeName["mock://1"] = "mock-one"
 				i.providerIDToNodeName["mock://2"] = "mock-two"
 			},
-			expectRetry:           true,
+			expectIPRetry:         true,
 			expectProviderIDToIP:  map[string]string{"mock://2": "192.168.1.1"},
 			expectAssignableIPs:   []string{"172.16.2.2"},
 			expectAssignableNodes: []string{"mock://1"},
@@ -217,7 +220,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 				require.Equal(t, providerID, status.nodeProviderID)
 			}
 
-			require.Equal(t, tc.expectRetry, i.nextRetry != time.Time{})
+			require.Equal(t, tc.expectIPRetry, i.nextRetry != time.Time{})
 			require.Equal(t, len(tc.expectAssignableIPs), i.assignableIPs.Len())
 			for _, ip := range tc.expectAssignableIPs {
 				require.True(t, i.assignableIPs.IsSet(ip))
@@ -247,7 +250,7 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 		setup                 func(i *ipController)
 		responses             []assignIPRes
 		expectProviderIDToIP  map[string]string
-		expectRetry           bool
+		expectIPRetry         bool
 		expectAssignableIPs   []string
 		expectAssignableNodes []string
 		eval                  func(i *ipController)
@@ -262,12 +265,13 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 			assignableNodes:      []string{"mock://1"},
 			expectProviderIDToIP: map[string]string{"mock://1": "192.168.1.1"},
 			responses:            []assignIPRes{{ip: "192.168.1.1", providerID: "mock://1"}},
-			expectRetry:          true, // We always retry, because of assign
+			expectIPRetry:        true, // We always retry, because of assign
 			setup: func(i *ipController) {
 				i.ipToStatus["192.168.1.1"] = &ipStatus{}
 			},
 			eval: func(i *ipController) {
 				require.Equal(t, provider.RetryFast, i.ipToStatus["192.168.1.1"].retrySchedule)
+				require.NotContains(t, i.providerIDToRetry, "mock://1")
 			},
 		},
 		{
@@ -276,12 +280,13 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 			assignableNodes:      []string{"mock://1"},
 			expectProviderIDToIP: map[string]string{"mock://1": "192.168.1.1"},
 			responses:            []assignIPRes{{ip: "192.168.1.1", providerID: "mock://1"}},
-			expectRetry:          true, // We always retry, because of assign
+			expectIPRetry:        true, // We always retry, because of assign
 			setup: func(i *ipController) {
 				i.ipToStatus["192.168.1.1"] = &ipStatus{}
 			},
 			eval: func(i *ipController) {
 				require.Equal(t, provider.RetrySlow, i.ipToStatus["192.168.1.1"].retrySchedule)
+				require.Contains(t, i.providerIDToRetry, "mock://1")
 			},
 		},
 	}
@@ -317,7 +322,7 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 				require.Equal(t, providerID, status.nodeProviderID)
 			}
 
-			require.Equal(t, tc.expectRetry, i.nextRetry != time.Time{})
+			require.Equal(t, tc.expectIPRetry, i.nextRetry != time.Time{})
 			require.Equal(t, len(tc.expectAssignableIPs), i.assignableIPs.Len())
 			for _, ip := range tc.expectAssignableIPs {
 				require.True(t, i.assignableIPs.IsSet(ip))
@@ -330,6 +335,97 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 			for _, providerID := range tc.expectAssignableNodes {
 				require.True(t, i.assignableNodes.IsSet(providerID))
 			}
+		})
+	}
+}
+
+func TestIPControllerDisableNode(t *testing.T) {
+	tcs := []struct {
+		name               string
+		setup              func(i *ipController)
+		expectAssignableIP bool
+	}{
+		{
+			name: "node was assignable",
+			setup: func(i *ipController) {
+				i.assignableNodes.Add("mock://1", true)
+				i.providerIDToIP["mock://1"] = ""
+				i.providerIDToNodeName["mock://1"] = "hello-world"
+			},
+		},
+		{
+			name: "already assigned",
+			setup: func(i *ipController) {
+				i.providerIDToIP["mock://1"] = "192.168.1.1"
+				i.ipToStatus["192.168.1.1"] = &ipStatus{nodeProviderID: "mock://1"}
+				i.providerIDToNodeName["mock://1"] = "hello-world"
+			},
+			expectAssignableIP: true,
+		},
+		{
+			name: "never seen",
+		},
+	}
+	for _, tc := range tcs {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			i := newIPController(logrus.New(), nil, "", nil)
+			if tc.setup != nil {
+				tc.setup(i)
+			}
+			i.DisableNode(&corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "hello-world"},
+				Spec:       corev1.NodeSpec{ProviderID: "mock://1"},
+			})
+			require.False(t, i.assignableNodes.IsSet("mock://"))
+			require.NotContains(t, i.providerIDToNodeName, "mock://1")
+			if tc.expectAssignableIP {
+				require.True(t, i.assignableIPs.IsSet("192.168.1.1"))
+			}
+		})
+	}
+}
+
+func TestIPControllerEnableNode(t *testing.T) {
+	tcs := []struct {
+		name             string
+		setup            func(i *ipController)
+		expectAssignable bool
+	}{
+		{
+			name:             "simple",
+			expectAssignable: true,
+		},
+		{
+			name:             "assignable",
+			expectAssignable: true,
+			setup: func(i *ipController) {
+				i.providerIDToIP["mock://1"] = ""
+				i.providerIDToNodeName["mock://1"] = "hello-world"
+			},
+		},
+		{
+			name: "already assigned",
+			setup: func(i *ipController) {
+				i.providerIDToIP["mock://1"] = "192.168.1.1"
+				i.ipToStatus["192.168.1.1"] = &ipStatus{nodeProviderID: "mock://1"}
+				i.providerIDToNodeName["mock://1"] = "hello-world"
+			},
+		},
+	}
+	for _, tc := range tcs {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			i := newIPController(logrus.New(), nil, "", nil)
+			if tc.setup != nil {
+				tc.setup(i)
+			}
+			i.EnableNode(&corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "hello-world"},
+				Spec:       corev1.NodeSpec{ProviderID: "mock://1"},
+			})
+			require.Equal(t, tc.expectAssignable, i.assignableNodes.IsSet("mock://1"))
+			require.Equal(t, "hello-world", i.providerIDToNodeName["mock://1"])
 		})
 	}
 }

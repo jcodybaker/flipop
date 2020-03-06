@@ -21,8 +21,8 @@ import (
 )
 
 type nodeEnableDisabler interface {
-	Enable(*corev1.Node)
-	Disable(*corev1.Node)
+	EnableNode(*corev1.Node)
+	DisableNode(*corev1.Node)
 }
 
 type matchController struct {
@@ -170,7 +170,7 @@ func (m *matchController) getNodePods(nodeName string) ([]*corev1.Pod, error) {
 }
 
 func (m *matchController) deleteNode(k8sNode *corev1.Node) {
-	m.action.Disable(k8sNode)
+	m.action.DisableNode(k8sNode)
 	delete(m.nodeNameToNode, k8sNode.Name)
 	return
 }
@@ -218,9 +218,9 @@ func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) 
 			}
 			return nil // updatePod will enable the node if appropriate
 		}
-		m.action.Enable(n.k8sNode)
+		m.action.EnableNode(n.k8sNode)
 	} else {
-		m.action.Disable(n.k8sNode)
+		m.action.DisableNode(n.k8sNode)
 	}
 	return nil
 }
@@ -283,12 +283,12 @@ func (m *matchController) updatePod(pod *corev1.Pod) error {
 	if ready && running {
 		n.matchingPods[podKey] = pod.DeepCopy()
 		if len(n.matchingPods) == 1 {
-			m.action.Enable(n.k8sNode)
+			m.action.EnableNode(n.k8sNode)
 		}
 	} else {
 		delete(n.matchingPods, podKey)
 		if len(n.matchingPods) == 0 {
-			m.action.Disable(n.k8sNode)
+			m.action.DisableNode(n.k8sNode)
 		}
 	}
 	return nil
@@ -305,7 +305,7 @@ func (m *matchController) deletePod(pod *corev1.Pod) {
 	podKey := podNamespacedName(pod)
 	delete(n.matchingPods, podKey)
 	if len(n.matchingPods) == 0 {
-		m.action.Disable(n.k8sNode)
+		m.action.DisableNode(n.k8sNode)
 	}
 }
 

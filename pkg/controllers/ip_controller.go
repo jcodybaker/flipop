@@ -288,6 +288,15 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 
 func (i *ipController) reconcileAssignment(ctx context.Context) {
 	var retryIPs, retryProviders []string
+	defer func() {
+		// Requeue anything we skipped or errored on.
+		for _, ip := range retryIPs {
+			i.assignableIPs.Add(ip, false)
+		}
+		for _, providerID := range retryProviders {
+			i.assignableNodes.Add(providerID, false)
+		}
+	}()
 	for i.assignableIPs.Len() != 0 && i.assignableNodes.Len() != 0 {
 		if ctx.Err() != nil {
 			return // short-circuit on context cancel.
@@ -295,8 +304,9 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 
 		ip := i.assignableIPs.Front()
 
+		// If this IP was previously involved in an error we shouldn't attempt to try again before
+		// its retry timestamp.
 		status := i.ipToStatus[ip]
-
 		if (status.nextRetry != time.Time{}) && !status.nextRetry.After(time.Now()) {
 			retryIPs = append(retryIPs, ip)
 			i.retry(status.nextRetry)
@@ -304,15 +314,15 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 		}
 
 		providerID := i.assignableNodes.Front()
+
+		// Similarly, if this node was involved in an error we should wait until after its retry
+		// timestamp has elapsed.
 		nRetry, ok := i.providerIDToRetry[providerID]
 		if ok && (nRetry.nextRetry != time.Time{}) && !nRetry.nextRetry.After(time.Now()) {
 			retryIPs = append(retryIPs, ip)
 			retryProviders = append(retryProviders, providerID)
 			i.retry(nRetry.nextRetry)
 			continue
-		} else if !ok {
-			nRetry = &retry{}
-			i.providerIDToRetry[providerID] = nRetry
 		}
 
 		oldProviderID := status.nodeProviderID
@@ -331,29 +341,27 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 		ll.Info("assigning IP to node")
 
 		err := i.provider.AssignIP(ctx, ip, providerID)
-		if err != nil && err != provider.ErrInProgress {
-			status.retrySchedule = provider.ErrorToRetrySchedule(err)
-			status.message = fmt.Sprintf("assigning IP to node: %s", err)
-			ll.WithError(err).Error("assigning IP to node")
-			nRetry.attempts, nRetry.nextRetry = nRetry.retrySchedule.Next(nRetry.attempts)
-			i.retry(nRetry.nextRetry)
-		} else { // success
+		if err == nil || err == provider.ErrInProgress {
 			status.message = "pending verification"
 			status.retrySchedule = provider.RetryFast
 			delete(i.providerIDToRetry, providerID)
 			_, status.nextRetry = status.retrySchedule.Next(status.attempts)
+		} else {
+			status.retrySchedule = provider.ErrorToRetrySchedule(err)
+			status.message = fmt.Sprintf("assigning IP to node: %s", err)
+			ll.WithError(err).Error("assigning IP to node")
+			if nRetry == nil {
+				nRetry = &retry{}
+			}
+			nRetry.attempts, nRetry.nextRetry = nRetry.retrySchedule.Next(nRetry.attempts)
+			i.providerIDToRetry[providerID] = nRetry
+			i.retry(nRetry.nextRetry)
 		}
 		i.retry(status.nextRetry)
 	}
-	for _, ip := range retryIPs {
-		i.assignableIPs.Add(ip, false)
-	}
-	for _, providerID := range retryProviders {
-		i.assignableNodes.Add(providerID, false)
-	}
 }
 
-func (i *ipController) ReleaseNode(node *corev1.Node) {
+func (i *ipController) DisableNode(node *corev1.Node) {
 	providerID := node.Spec.ProviderID
 	if providerID == "" {
 		return
@@ -383,8 +391,7 @@ func (i *ipController) EnableNode(node *corev1.Node) {
 	defer i.lock.Unlock()
 	i.poke <- struct{}{}
 	i.providerIDToNodeName[providerID] = node.Name
-	if _, ok := i.providerIDToIP[providerID]; ok {
-		// TODO - register for immediate recheck.
+	if ip := i.providerIDToIP[providerID]; ip != "" {
 		return // Already has an IP.
 	}
 	i.assignableNodes.Add(providerID, false)
