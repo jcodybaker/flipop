@@ -457,14 +457,23 @@ func (i *ipController) DisableNode(node *corev1.Node) {
 	}
 	i.lock.Lock()
 	defer i.lock.Unlock()
-
+	if _, ok := i.providerIDToNodeName[providerID]; !ok {
+		return // Wasn't enabled
+	}
+	ll := i.ll.WithFields(logrus.Fields{
+		"node":        node.Name,
+		"provider_id": providerID,
+	})
 	delete(i.providerIDToNodeName, providerID)
-	if ip, ok := i.providerIDToIP[providerID]; ok {
+	if ip := i.providerIDToIP[providerID]; ip != "" {
 		// Add this IP to the back of the list. This increases the chances that the IP mapping
 		// can be retained if the node recovers.
 		i.assignableIPs.Add(ip, false)
 		// cancel any pending retries
 		delete(i.ipToStatus, ip)
+		ll.WithField("ip", ip).Info("node disabled; ip added to assignable list")
+	} else {
+		ll.Info("node disabled")
 	}
 	i.assignableNodes.Delete(providerID)
 	// We leave the providerID<->IP mappings in providerIDToIP/ipStatus.nodeProviderID so we can
@@ -479,11 +488,21 @@ func (i *ipController) EnableNode(node *corev1.Node) {
 	}
 	i.lock.Lock()
 	defer i.lock.Unlock()
+	if _, ok := i.providerIDToNodeName[providerID]; ok {
+		return // Already enabled.
+	}
 	i.poke()
 	i.providerIDToNodeName[providerID] = node.Name
+	ll := i.ll.WithFields(logrus.Fields{
+		"node":        node.Name,
+		"provider_id": providerID,
+	})
 	if ip := i.providerIDToIP[providerID]; ip != "" {
+		ll.WithField("ip", ip).Info("enabling node; already assigned to ip")
+		i.assignableIPs.Delete(ip)
 		return // Already has an IP.
 	}
+	ll.Info("enabling node; submitted to assignable node queue")
 	i.assignableNodes.Add(providerID, false)
 }
 

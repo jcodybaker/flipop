@@ -171,30 +171,19 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 
 func (c *FloatingIPPoolController) validate(ll logrus.FieldLogger, k8sPool *flipopv1alpha1.FloatingIPPool) bool {
 	if _, ok := c.providers[k8sPool.Spec.Provider]; !ok {
-		s := flipopv1alpha1.FloatingIPPoolStatus{
-			Error: fmt.Sprintf("unknown provider %q", k8sPool.Spec.Provider),
-		}
-		if reflect.DeepEqual(s, k8sPool.Status) {
-			return false
-		}
+		c.updateStatus(k8sPool, fmt.Sprintf("unknown provider %q", k8sPool.Spec.Provider))
 		ll.Warn("FloatingIPPool referenced unknown provider")
-		_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
-		if err != nil {
-			ll.WithError(err).Error("updating FloatingIPPool status")
-		}
+		return false
+	}
+	if len(k8sPool.Spec.IPs) == 0 && k8sPool.Spec.DesiredIPs == 0 {
+		c.updateStatus(k8sPool, "ips or desiredIPs must be provided")
+		ll.Warn("FloatingIPPool had neither ips nor desiredIPs")
 		return false
 	}
 	err := validateMatch(&k8sPool.Spec.Match)
 	if err != nil {
-		s := flipopv1alpha1.FloatingIPPoolStatus{Error: "Error " + err.Error()}
-		if reflect.DeepEqual(s, k8sPool.Status) {
-			return false
-		}
+		c.updateStatus(k8sPool, "Error "+err.Error())
 		ll.WithError(err).Warn("FloatingIPPool had invalid match criteria")
-		_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
-		if err != nil {
-			ll.WithError(err).Error("updating FloatingIPPool status")
-		}
 		return false
 	}
 	return true
@@ -218,6 +207,16 @@ func (c *FloatingIPPoolController) OnDelete(obj interface{}) {
 	delete(c.pools, k8sPool.GetSelfLink())
 }
 
-func (c *FloatingIPPoolController) updateStatus() {
-
+func (c *FloatingIPPoolController) updateStatus(k8sPool *flipopv1alpha1.FloatingIPPool, errMsg string) {
+	s := flipopv1alpha1.FloatingIPPoolStatus{
+		Error: errMsg,
+	}
+	if reflect.DeepEqual(s, k8sPool.Status) {
+		return
+	}
+	k8sPool.Status = s
+	_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
+	if err != nil {
+		c.ll.WithError(err).Error("updating FloatingIPPool status")
+	}
 }

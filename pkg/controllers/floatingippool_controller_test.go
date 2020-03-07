@@ -21,12 +21,16 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+// These tests try to approximate an end-to-end workflow.  The ipController and matchController
+// also have their own more comprehensive tests.
 func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 	tcs := []struct {
 		name                  string
 		objs                  []metav1.Object
 		manip                 func(*flipopv1alpha1.FloatingIPPool)
 		initialIPAssignment   map[string]string
+		createIPs             []string
+		expectError           string
 		expectAssignedIPs     int // just a count because node assignment is non-deterministic
 		expectAssignableIPs   int
 		expectAssignableNodes int
@@ -48,12 +52,27 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			expectAssignableIPs: 1,
 		},
 		{
+			name: "create new ips",
+			objs: []metav1.Object{
+				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				makePod("benjamin-sisko", "rio-grande",
+					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+			},
+			createIPs: []string{"10.0.1.1", "10.0.2.2"},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.IPs = nil
+				f.Spec.DesiredIPs = 2
+			},
+			expectAssignedIPs:   1,
+			expectAssignableIPs: 1,
+		},
+		{
 			name: "already has ip",
 			objs: []metav1.Object{
 				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
 				makeNode("ganges", "mock://2"), // should be ignored
-				makeNode("orinoco", "mock://3", // should also be ignored because of taint.
-					markReady, setLabels(matchingNodeLabels), setTaints(noSchedule)),
+				// makeNode("orinoco", "mock://3", // should also be ignored because of taint.
+				// 	markReady, setLabels(matchingNodeLabels), setTaints(noSchedule)),
 				makePod("benjamin-sisko", "rio-grande",
 					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
 				makePod("worf", "orinoco",
@@ -142,6 +161,45 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			expectAssignableNodes: 1, // We have 3 matching nodes, but only 2 ips, one has to wait.
 			expectAssignedIPs:     2,
 		},
+		{
+			name: "invalid pod selector",
+			objs: []metav1.Object{},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.Match.PodLabel = "#invalid#"
+			},
+			expectError: "Error parsing pod selector: unable to parse requirement: " +
+				"invalid label key \"#invalid#\": name part must consist of alphanumeric characters, " +
+				"'-', '_' or '.', and must start and end with an alphanumeric character " +
+				"(e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')",
+		},
+		{
+			name: "invalid node selector",
+			objs: []metav1.Object{},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.Match.NodeLabel = "#invalid#"
+			},
+			expectError: "Error parsing node selector: unable to parse requirement: " +
+				"invalid label key \"#invalid#\": name part must consist of alphanumeric characters, " +
+				"'-', '_' or '.', and must start and end with an alphanumeric character " +
+				"(e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]')",
+		},
+		{
+			name: "unknown provider",
+			objs: []metav1.Object{},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.Provider = "Ferengi"
+			},
+			expectError: "unknown provider \"Ferengi\"",
+		},
+		{
+			name: "no ips or desired ips",
+			objs: []metav1.Object{},
+			manip: func(f *flipopv1alpha1.FloatingIPPool) {
+				f.Spec.IPs = nil
+				f.Spec.DesiredIPs = 0
+			},
+			expectError: "ips or desiredIPs must be provided",
+		},
 	}
 	for _, tc := range tcs {
 		tc := tc
@@ -158,6 +216,8 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 				ipAssignment[ip] = providerIP
 			}
 
+			ll := logrus.New()
+			ll.SetLevel(logrus.DebugLevel)
 			c := &FloatingIPPoolController{
 				kubeCS:   kubeCSFake.NewSimpleClientset(asRuntimeObjects(tc.objs)...),
 				flipopCS: flipCSFake.NewSimpleClientset(k8s),
@@ -168,28 +228,39 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 						},
 						AssignIPFunc: func(ctx context.Context, ip, providerID string) error {
 							ipAssignment[ip] = providerID
-							cancel()
 							return nil
+						},
+						CreateIPFunc: func(ctx context.Context, region string) (string, error) {
+							require.GreaterOrEqual(t, len(tc.createIPs), 1, "unexpected CreateIP call")
+							ip := tc.createIPs[0]
+							tc.createIPs = tc.createIPs[1:]
+							return ip, nil
 						},
 					},
 				},
 				pools: make(map[string]floatingIPPool),
 				ctx:   ctx,
-				ll:    logrus.New(),
+				ll:    ll,
 			}
 			c.updateOrAdd(k8s)
+			if tc.expectError != "" {
+				updatedK8s, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8s.Namespace).Get(k8s.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.NotNil(t, updatedK8s)
+				require.Equal(t, tc.expectError, updatedK8s.Status.Error)
+				return
+			}
 
 			f, ok := c.pools[k8s.GetSelfLink()]
 			require.True(t, ok)
-			f.matchController.wg.Wait()
-			f.ipController.wg.Wait()
+
+			f.runToSynchronize(ctx)
 			require.NotNil(t, f.matchController.match)
 			// require.Empty(t, f.k8s.Status.Error)
 
-			// require.Len(t, ipAssignment, tc.expectAssignedIPs)
-			// require.Equal(t, tc.expectAssignableIPs, f.assignableIPs.Len())
-
-			// require.Len(t, f.assignableNodes, tc.expectAssignableNodes)
+			require.Len(t, ipAssignment, tc.expectAssignedIPs)
+			require.Equal(t, tc.expectAssignableIPs, f.ipController.assignableIPs.Len())
+			require.Equal(t, tc.expectAssignableNodes, f.ipController.assignableNodes.Len())
 		})
 	}
 }
@@ -458,6 +529,31 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 // 		})
 // 	}
 // }
+
+// runToSynchronized
+func (f *floatingIPPool) runToSynchronize(ctx context.Context) {
+	poll := time.NewTicker(200 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			// Wait for the matchController's informers to fully populate their caches.
+			if f.matchController.primed {
+				// The resync, synchronously applies all cached items. This lets us
+				// guarantee that the matchController has had the opportunity to process
+				// the resources
+				f.matchController.resync()
+				f.matchController.stop()
+				f.ipController.stop()
+				// synchronously run through the ipController reconcile loop.
+				f.ipController.reconcile(ctx)
+				return
+			}
+		}
+	}
+}
 
 var matchingPodLabels = labels.Set(map[string]string{
 	"vessel": "runabout",

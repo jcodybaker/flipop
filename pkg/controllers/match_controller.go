@@ -269,8 +269,10 @@ func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) 
 		}
 		n = newNode(k8sNode)
 		m.nodeNameToNode[n.getName()] = n
+		ll.Info("new node")
 	} else {
 		n.k8sNode = k8sNode
+		ll.Debug("node updated")
 	}
 
 	var oldNodeMatch = n.isNodeMatch
@@ -297,8 +299,10 @@ func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) 
 			}
 			return nil // updatePod will enable the node if appropriate
 		}
+		ll.Info("enabling node")
 		m.action.EnableNode(n.k8sNode)
 	} else {
+		ll.Info("disabling node")
 		m.action.DisableNode(n.k8sNode)
 	}
 	return nil
@@ -362,11 +366,13 @@ func (m *matchController) updatePod(pod *corev1.Pod) error {
 	if ready && running {
 		n.matchingPods[podKey] = pod.DeepCopy()
 		if len(n.matchingPods) == 1 {
+			ll.Debug("enabling node; pod update met node match criteria")
 			m.action.EnableNode(n.k8sNode)
 		}
 	} else {
 		delete(n.matchingPods, podKey)
 		if len(n.matchingPods) == 0 {
+			ll.Debug("disabling node; updated pod no longer meets node match criteria")
 			m.action.DisableNode(n.k8sNode)
 		}
 	}
