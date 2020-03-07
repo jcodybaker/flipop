@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
-	flipopCS "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
 	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +19,13 @@ import (
 	corev1Informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+)
+
+const (
+	floatingIPPoolResyncPeriod = 5 * time.Minute
+	podResyncPeriod            = 5 * time.Minute
+	nodeResyncPeriod           = 5 * time.Minute
+	podNodeNameIndexerName     = "podNodeName"
 )
 
 type nodeEnableDisabler interface {
@@ -33,9 +41,9 @@ type matchController struct {
 
 	nodeNameToNode map[string]*node
 
-	ll       logrus.FieldLogger
-	kubeCS   kubernetes.Interface
-	flipopCS flipopCS.Interface
+	ll           logrus.FieldLogger
+	kubeCS       kubernetes.Interface
+	nodeInformer cache.SharedIndexInformer
 
 	wg     sync.WaitGroup
 	ctx    context.Context
@@ -50,15 +58,71 @@ type matchController struct {
 	action nodeEnableDisabler
 }
 
+func newMatchController(ll logrus.FieldLogger, kubeCS kubernetes.Interface) *matchController {
+	m := &matchController{
+		ll:     ll,
+		kubeCS: kubeCS,
+	}
+	m.reset()
+	return m
+}
+
+func (m *matchController) start(ctx context.Context) {
+	if m.cancel != nil {
+		return // already running.
+	}
+	m.ctx, m.cancel = context.WithCancel(ctx)
+	m.wg.Add(1)
+	go m.run()
+}
+
 func (m *matchController) stop() {
-	m.cancel()
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
 	m.wg.Wait()
 }
 
-func (m *matchController) reset(ctx context.Context) {
-	m.ctx, m.cancel = context.WithCancel(ctx)
+func (m *matchController) reset() {
 	m.nodeNameToNode = make(map[string]*node)
 	m.primed = false
+	m.nodeInformer = nil
+}
+
+// updateCriteria sets the match criteria based on the match spec. If the criteria has changed
+// any current reconciliation is stopped, and the match criteria are updated, and we return true.
+// If the criteria are unchanged, execution will continue, and false is returned.
+func (m *matchController) updateCriteria(match *flipopv1alpha1.Match) bool {
+	if m.match != nil && reflect.DeepEqual(match, m.match) {
+		return false
+	}
+	m.stop()
+	m.reset()
+
+	var err error
+	m.nodeSelector = nil
+	if m.match.NodeLabel != "" {
+		m.nodeSelector, err = labels.Parse(m.match.NodeLabel)
+		if err != nil { // This shouldn't happen if the caller used validateMatch
+			m.ll.WithError(err).Error("parsing node selector")
+			m.match = nil
+			return false
+		}
+	}
+
+	m.podSelector = nil
+	if m.match.PodLabel != "" {
+		m.podSelector, err = labels.Parse(m.match.PodLabel)
+		if err != nil {
+			m.ll.WithError(err).Error("parsing pod selector")
+			m.match = nil
+			return false
+		}
+	}
+	m.ll.Info("match criteria updated")
+	m.match = match.DeepCopy()
+	return true
 }
 
 func podNodeNameIndexer(obj interface{}) ([]string, error) {
@@ -71,6 +135,12 @@ func podNodeNameIndexer(obj interface{}) ([]string, error) {
 
 func (m *matchController) run() {
 	defer m.wg.Done()
+	if m.match != nil {
+		// The only way this should happen is if updateK8s was never called, or a match criteria
+		// passed validation with validateMatch, but then failed updateK8s.
+		m.ll.Warn("no match criteria set; cannot reconcile")
+		return
+	}
 	// This does NOT use shared informers which CAN consume more memory and Kubernetes API
 	// connections, IF there are other consumers which need the same subscription. Since we filter
 	// on labels (and namespace for pod), we would need a shared-informer for each label-set/ns
@@ -105,7 +175,7 @@ func (m *matchController) run() {
 		m.podIndexer = nil
 	}
 
-	nodeInformer := corev1Informers.NewFilteredNodeInformer(
+	m.nodeInformer = corev1Informers.NewFilteredNodeInformer(
 		m.kubeCS, nodeResyncPeriod, cache.Indexers{},
 		func(opts *v1.ListOptions) {
 			if m.nodeSelector != nil {
@@ -113,30 +183,39 @@ func (m *matchController) run() {
 			}
 		},
 	)
-	nodeInformer.AddEventHandler(m)
+	m.nodeInformer.AddEventHandler(m)
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		nodeInformer.Run(m.ctx.Done())
+		m.nodeInformer.Run(m.ctx.Done())
 	}()
-	syncFuncs = append(syncFuncs, nodeInformer.HasSynced)
+	syncFuncs = append(syncFuncs, m.nodeInformer.HasSynced)
 
 	if !cache.WaitForCacheSync(m.ctx.Done(), syncFuncs...) {
 		if m.ctx.Err() != nil {
 			// We don't know why the context was canceled, but this can be a normal error if the
 			// FloatingIPPool spec changed during initialization.
-			m.ll.WithError(m.ctx.Err()).Error("failed to sync dependencies for FloatingIPPool; maybe spec changed")
+			m.ll.WithError(m.ctx.Err()).Error("failed to sync dependencies; maybe spec changed")
 		} else {
-			m.ll.Error("failed to sync dependencies for FloatingIPPool")
+			m.ll.Error("failed to sync dependencies")
 		}
 		return
 	}
-
+	m.Lock()
+	m.primed = true
+	m.Unlock()
 	// After the caches are sync'ed we need to loop through nodes again, otherwise pods which were
 	// added before the node was known may be missing.
+	m.resync()
+}
+
+func (m *matchController) resync() {
 	m.Lock()
 	defer m.Unlock()
-	for _, o := range nodeInformer.GetStore().List() {
+	if !m.primed {
+		return // initial sync is still pending
+	}
+	for _, o := range m.nodeInformer.GetStore().List() {
 		k8sNode, ok := o.(*corev1.Node)
 		if !ok {
 			m.ll.Error("node informer store produced non-node")
@@ -147,9 +226,7 @@ func (m *matchController) run() {
 			m.ll.WithError(err).Error("updating node")
 		}
 	}
-	m.primed = true
-	m.ll.Info("FloatingIPPool synchronized")
-	m.setStatus(m.ctx, "")
+	m.ll.Info("synchronized")
 }
 
 func (m *matchController) getNodePods(nodeName string) ([]*corev1.Pod, error) {
@@ -407,7 +484,6 @@ func (m *matchController) OnDelete(obj interface{}) {
 type node struct {
 	k8sNode      *corev1.Node
 	isNodeMatch  bool
-	ip           string
 	matchingPods map[string]*corev1.Pod
 }
 
@@ -428,4 +504,21 @@ func (n *node) getProviderID() string {
 
 func podNamespacedName(pod *corev1.Pod) string {
 	return fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+}
+
+func validateMatch(match *flipopv1alpha1.Match) error {
+	if match.NodeLabel != "" {
+		_, err := labels.Parse(match.NodeLabel)
+		if err != nil {
+			return fmt.Errorf("parsing node selector: %w", err)
+		}
+	}
+
+	if match.PodLabel != "" {
+		_, err := labels.Parse(match.PodLabel)
+		if err != nil {
+			return fmt.Errorf("parsing pod selector: %w", err)
+		}
+	}
+	return nil
 }

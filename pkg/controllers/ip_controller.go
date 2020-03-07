@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -24,9 +25,6 @@ var (
 type NewIPFunc func(ctx context.Context, ips []string) error
 
 type ipController struct {
-	nextRetry  time.Time
-	retryTimer *time.Timer
-
 	provider provider.Provider
 	region   string
 
@@ -36,9 +34,13 @@ type ipController struct {
 
 	onNewIPs NewIPFunc
 
-	ll   logrus.FieldLogger
-	poke chan struct{}
-	lock sync.Mutex
+	ll       logrus.FieldLogger
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	pokeChan chan struct{}
+	lock     sync.Mutex
+
+	nextRetry time.Time
 
 	createRetrySchedule provider.RetrySchedule
 	createAttempts      int
@@ -72,38 +74,120 @@ type retry struct {
 }
 
 // newIPController initializes an ipController.
-func newIPController(ll logrus.FieldLogger, prov provider.Provider, region string, onNewIPs NewIPFunc) *ipController {
-	return &ipController{
-		ll:                   ll,
-		provider:             prov,
-		region:               region,
-		onNewIPs:             onNewIPs,
-		ipToStatus:           make(map[string]*ipStatus),
-		providerIDToRetry:    make(map[string]*retry),
-		providerIDToIP:       make(map[string]string),
-		providerIDToNodeName: make(map[string]string),
-		assignableIPs:        newOrderedSet(),
-		assignableNodes:      newOrderedSet(),
-		// poke MUST be a buffered channel because we hold the lock when poking, AND when consuming
-		// the poke.
-		poke:       make(chan struct{}, 10),
-		retryTimer: time.NewTimer(0),
+func newIPController(ll logrus.FieldLogger, onNewIPs NewIPFunc) *ipController {
+	i := &ipController{
+		ll:       ll,
+		onNewIPs: onNewIPs,
+		pokeChan: make(chan struct{}, 1),
 	}
+	i.reset()
+	return i
+}
+
+func (i *ipController) reset() {
+	i.ipToStatus = make(map[string]*ipStatus)
+	i.providerIDToRetry = make(map[string]*retry)
+	i.providerIDToIP = make(map[string]string)
+	i.providerIDToNodeName = make(map[string]string)
+	i.assignableIPs = newOrderedSet()
+	i.assignableNodes = newOrderedSet()
+}
+
+func (i *ipController) start(ctx context.Context) {
+	if i.cancel != nil {
+		return
+	}
+	i.wg.Add(1)
+	ctx, i.cancel = context.WithCancel(ctx)
+	go i.run(ctx)
+}
+
+func (i *ipController) stop() {
+	if i.cancel != nil {
+		i.cancel()
+	}
+	i.wg.Wait()
+	i.cancel = nil
+}
+
+func (i *ipController) updateProvider(prov provider.Provider, region string) bool {
+	if i.provider != prov || i.region != region {
+		i.stop()
+		i.reset()
+		i.region = region
+		i.provider = prov
+		return true
+	}
+	return false
+}
+
+func (i *ipController) updateIPs(ips []string, desiredIPs int) {
+	i.lock.Lock()
+	defer i.lock.Unlock()
+	var discarded []string
+	if len(ips) > desiredIPs {
+		discarded = ips[desiredIPs:]
+		ips = ips[0:desiredIPs]
+	}
+	if reflect.DeepEqual(ips, i.ips) &&
+		(i.desiredIPs == desiredIPs || desiredIPs == 0 || (i.desiredIPs == 0 && desiredIPs == len(ips))) {
+		i.desiredIPs = desiredIPs
+		return
+	}
+	if len(discarded) != 0 { // only log if the spec changed.
+		i.ll.WithField("ips", discarded).Warn("update desiredIPs < len(ips); some IPs will be ignored")
+	}
+
+	// We really only care about removed IPs. The reconciler will take care of adding new ones.
+	knownIPs := make(map[string]struct{})
+	for _, ip := range ips {
+		if _, ok := i.ipToStatus[ip]; ok {
+			knownIPs[ip] = struct{}{}
+		}
+	}
+	for ip, status := range i.ipToStatus {
+		if _, ok := knownIPs[ip]; ok {
+			continue
+		}
+		ll := i.ll.WithField("ip", ip)
+		if status.nodeProviderID == "" {
+			ll.Info("update removes ip without node assignment")
+		} else {
+			if nodeName, ok := i.providerIDToNodeName[status.nodeProviderID]; ok {
+				ll.WithField("node", nodeName).Warn("update removes ip assigned to active node")
+				i.assignableNodes.Add(status.nodeProviderID, true) // This node needs reassigned ASAP.
+			} else {
+				// We don't unassign IPs when DisableNode is called, we just mark the ip as assignable.
+				ll.Info("update removes ip assigned to inactive node")
+			}
+			i.assignableIPs.Delete(ip)
+			delete(i.ipToStatus, ip)
+			i.providerIDToIP[status.nodeProviderID] = ""
+			delete(i.providerIDToRetry, status.nodeProviderID)
+		}
+	}
+	i.ips = ips
+	i.desiredIPs = desiredIPs
+	i.poke()
+	i.ll.Info("ip configuration updated")
+	return
 }
 
 // Run will start reconciliation of floating IPs until the context is canceled.
-func (i *ipController) Run(ctx context.Context) {
+func (i *ipController) run(ctx context.Context) {
+	i.reconcile(ctx)
+	retryTimer := time.NewTimer(i.retryTimerDuration())
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-i.poke:
-			i.retryTimer.Stop() // need to drain the timer
+		case <-i.pokeChan:
+			retryTimer.Stop() // need to drain the timer
 			i.reconcile(ctx)
-		case <-i.retryTimer.C:
+		case <-retryTimer.C:
 			i.reconcile(ctx)
 		}
-		i.retryTimer.Reset(i.retryTimerDuration())
+		retryTimer.Reset(i.retryTimerDuration())
 	}
 }
 
@@ -368,7 +452,7 @@ func (i *ipController) DisableNode(node *corev1.Node) {
 	}
 	i.lock.Lock()
 	defer i.lock.Unlock()
-	i.poke <- struct{}{}
+
 	delete(i.providerIDToNodeName, providerID)
 	if ip, ok := i.providerIDToIP[providerID]; ok {
 		// Add this IP to the back of the list. This increases the chances that the IP mapping
@@ -380,6 +464,7 @@ func (i *ipController) DisableNode(node *corev1.Node) {
 	i.assignableNodes.Delete(providerID)
 	// We leave the providerID<->IP mappings in providerIDToIP/ipStatus.nodeProviderID so we can
 	// reuse the IP mapping, if it's not immediately recovered.
+	i.poke()
 }
 
 func (i *ipController) EnableNode(node *corev1.Node) {
@@ -389,12 +474,19 @@ func (i *ipController) EnableNode(node *corev1.Node) {
 	}
 	i.lock.Lock()
 	defer i.lock.Unlock()
-	i.poke <- struct{}{}
+	i.poke()
 	i.providerIDToNodeName[providerID] = node.Name
 	if ip := i.providerIDToIP[providerID]; ip != "" {
 		return // Already has an IP.
 	}
 	i.assignableNodes.Add(providerID, false)
+}
+
+func (i *ipController) poke() {
+	select {
+	case i.pokeChan <- struct{}{}:
+	default: // if there's already a poke in queued, we don't need another.
+	}
 }
 
 type orderedSet struct {

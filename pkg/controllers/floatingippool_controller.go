@@ -1,27 +1,27 @@
-/*
-MIT License
+// /*
+// MIT License
 
-Copyright (c) 2020 John Cody Baker
+// Copyright (c) 2020 John Cody Baker
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
 
-*/
+// */
 
 package controllers
 
@@ -30,13 +30,10 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-	"time"
 
 	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
 	"github.com/jcodybaker/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
-
-	"k8s.io/apimachinery/pkg/labels"
 
 	flipopCS "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
 
@@ -49,13 +46,6 @@ import (
 	flipopInformers "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop/v1alpha1"
 )
 
-const (
-	floatingIPPoolResyncPeriod = 5 * time.Minute
-	podResyncPeriod            = 5 * time.Minute
-	nodeResyncPeriod           = 5 * time.Minute
-	podNodeNameIndexerName     = "podNodeName"
-)
-
 // FloatingIPPoolController watches for FloatingIPPool and then manages reconciliation for each
 // pool.
 type FloatingIPPoolController struct {
@@ -64,7 +54,7 @@ type FloatingIPPoolController struct {
 
 	providers map[string]provider.Provider
 
-	pools    map[string]*matchController
+	pools    map[string]floatingIPPool
 	poolLock sync.Mutex
 
 	// Fields provided at runtime.
@@ -72,11 +62,16 @@ type FloatingIPPoolController struct {
 	ctx context.Context
 }
 
+type floatingIPPool struct {
+	matchController *matchController
+	ipController    *ipController
+}
+
 // NewFloatingIPPoolController creates a new FloatingIPPoolController.
 func NewFloatingIPPoolController(kubeConfig clientcmd.ClientConfig, providers map[string]provider.Provider, ll logrus.FieldLogger) (*FloatingIPPoolController, error) {
 	c := &FloatingIPPoolController{
 		providers: providers,
-		pools:     make(map[string]*matchController),
+		pools:     make(map[string]floatingIPPool),
 		ll:        ll,
 	}
 	var err error
@@ -105,7 +100,8 @@ func (c *FloatingIPPoolController) Run(ctx context.Context) {
 	for _, m := range c.pools {
 		// Our parent's canceling of the context should stop all of the children concurrently.
 		// This loop just verifies all children have completed.
-		m.stop()
+		m.matchController.stop()
+		// TODO - stop the ipController
 	}
 }
 
@@ -127,74 +123,79 @@ func (c *FloatingIPPoolController) OnUpdate(_, newObj interface{}) {
 	c.updateOrAdd(k8sPool, true)
 }
 
-func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingIPPool, fork bool) {
+func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingIPPool, async bool) {
 	c.poolLock.Lock()
 	defer c.poolLock.Unlock()
+	ll := c.ll.WithField("floating_ip_pool", fmt.Sprintf("%s/%s", k8sPool.Namespace, k8sPool.Name))
+	isValid := c.validate(ll, k8sPool)
+
 	pool, ok := c.pools[k8sPool.GetSelfLink()]
 	if !ok {
-		pool = &matchController{
-			ll:       c.ll.WithFields(logrus.Fields{"pool": k8sPool.GetSelfLink()}),
-			kubeCS:   c.kubeCS,
-			flipopCS: c.flipopCS,
+		if !isValid {
+			return
 		}
-		pool.ll.Info("FloatingIPPool added; beginning reconciliation")
+		pool = floatingIPPool{
+			matchController: newMatchController(ll, c.kubeCS),
+			ipController:    newIPController(ll, nil),
+		}
+		ll.Info("FloatingIPPool added; beginning reconciliation")
 		c.pools[k8sPool.GetSelfLink()] = pool
 	}
-	specChange := true
-	if pool.match != nil {
-		specChange = !reflect.DeepEqual(&pool.match, &k8sPool.Spec.Match)
-	}
-	pool.match = k8sPool.Spec.Match.DeepCopy()
-	if !specChange {
-		return // nothing to do
-	}
-	if ok {
-		pool.ll.Info("FloatingIPPool changed")
-		// This blocks while we wait for the current execution to stop. In theory that should
-		// happen quickly, but it's possible that it blocks for a while and we're holding the
-		// pool lock.
-		pool.stop()
-	}
-
-	pool.reset(c.ctx)
-
-	prov := c.providers[k8sPool.Spec.Provider]
-	if prov == nil {
-		pool.ll.WithFields(logrus.Fields{"provider": k8sPool.Spec.Provider}).
-			Error("FloatingIPPool referenced unknown provider")
-		pool.setStatus(pool.ctx, fmt.Sprintf("unknown provider %q", k8sPool.Spec.Provider))
+	if !isValid {
+		pool.matchController.stop()
+		pool.ipController.stop()
+		delete(c.pools, k8sPool.GetSelfLink())
 		return
 	}
-	// TODO
 
-	var err error
-	pool.nodeSelector = nil
+	prov := c.providers[k8sPool.Spec.Provider]
+	ipChange := pool.ipController.updateProvider(prov, k8sPool.Spec.Region)
 
-	if pool.match.NodeLabel != "" {
-		pool.nodeSelector, err = labels.Parse(pool.match.NodeLabel)
-		if err != nil {
-			pool.ll.WithError(err).Error("parsing node selector")
-			pool.setStatus(pool.ctx, fmt.Sprintf("parsing node selector: %s", err))
-			return
+	matchChange := pool.matchController.updateCriteria(&k8sPool.Spec.Match)
+	if matchChange {
+		// Changing match criteria invalids any existing assignment, restart the ipController.
+		// Assignments for nodes matching both old and new criteria, should remain in place.
+		pool.ipController.stop()
+		ipChange = true
+		pool.matchController.start(c.ctx)
+	}
+
+	pool.ipController.updateIPs(k8sPool.Spec.IPs, k8sPool.Spec.DesiredIPs)
+	if ipChange {
+		pool.ipController.start(c.ctx)
+		pool.matchController.resync()
+	}
+}
+
+func (c *FloatingIPPoolController) validate(ll logrus.FieldLogger, k8sPool *flipopv1alpha1.FloatingIPPool) bool {
+	if _, ok := c.providers[k8sPool.Spec.Provider]; !ok {
+		s := flipopv1alpha1.FloatingIPPoolStatus{
+			Error: fmt.Sprintf("unknown provider %q", k8sPool.Spec.Provider),
 		}
-	}
-
-	pool.podSelector = nil
-	if pool.match.PodLabel != "" {
-		pool.podSelector, err = labels.Parse(pool.match.PodLabel)
-		if err != nil {
-			pool.ll.WithError(err).Error("parsing pod selector")
-			pool.setStatus(pool.ctx, fmt.Sprintf("parsing pod selector: %s", err))
-			return
+		if reflect.DeepEqual(s, k8sPool.Status) {
+			return false
 		}
+		ll.Warn("FloatingIPPool referenced unknown provider")
+		_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
+		if err != nil {
+			ll.WithError(err).Error("updating FloatingIPPool status")
+		}
+		return false
 	}
-
-	pool.wg.Add(1)
-	if fork {
-		go pool.run()
-	} else { // This option really only exists for testing.
-		pool.run()
+	err := validateMatch(&k8sPool.Spec.Match)
+	if err != nil {
+		s := flipopv1alpha1.FloatingIPPoolStatus{Error: "Error " + err.Error()}
+		if reflect.DeepEqual(s, k8sPool.Status) {
+			return false
+		}
+		ll.WithError(err).Warn("FloatingIPPool had invalid match criteria")
+		_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
+		if err != nil {
+			ll.WithError(err).Error("updating FloatingIPPool status")
+		}
+		return false
 	}
+	return true
 }
 
 // OnDelete implements the shared informer ResourceEventHandler for FloatingIPPools.
@@ -209,6 +210,8 @@ func (c *FloatingIPPoolController) OnDelete(obj interface{}) {
 	if !ok {
 		return
 	}
-	pool.stop()
+	c.ll.WithField("floating_ip_pool", fmt.Sprintf("%s/%s", k8sPool.Namespace, k8sPool.Name)).Info("pool deleted")
+	pool.matchController.stop()
+	pool.ipController.stop()
 	delete(c.pools, k8sPool.GetSelfLink())
 }
