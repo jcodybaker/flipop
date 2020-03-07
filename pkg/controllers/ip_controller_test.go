@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jcodybaker/flipop/pkg/provider"
+	"github.com/digitalocean/flipop/pkg/provider"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"

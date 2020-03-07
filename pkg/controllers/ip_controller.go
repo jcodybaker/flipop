@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jcodybaker/flipop/pkg/provider"
+	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 )

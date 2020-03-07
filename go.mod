@@ -1,4 +1,4 @@
-module github.com/jcodybaker/flipop
+module github.com/digitalocean/flipop
 
 go 1.13
 
@@ -6,7 +6,7 @@ require (
 	github.com/Showmax/go-fqdn v0.0.0-20180501083314-6f60894d629f
 	github.com/digitalocean/godo v1.31.0
 	github.com/go-logr/zapr v0.1.0
-	github.com/jcodybaker/wgmesh v0.0.0-20200114020548-e5bad9c9b2e6
+	github.com/digitalocean/wgmesh v0.0.0-20200114020548-e5bad9c9b2e6
 	github.com/lytics/logrus v0.0.0-20170528191427-4389a17ed024
 	github.com/mattn/go-isatty v0.0.10
 	github.com/mmcshane/testify v1.2.2

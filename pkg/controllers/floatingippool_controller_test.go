@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
-	"github.com/jcodybaker/flipop/pkg/provider"
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
+	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	flipCSFake "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/fake"
+	flipCSFake "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/fake"
 
 	kubeCSFake "k8s.io/client-go/kubernetes/fake"
 
