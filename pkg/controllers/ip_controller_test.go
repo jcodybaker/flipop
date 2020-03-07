@@ -197,7 +197,8 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			i := newIPController(logrus.New(), &provider.MockProvider{
+			i := newIPController(logrus.New(), nil)
+			i.updateProvider(&provider.MockProvider{
 				IPtoProviderIDFunc: func(_ context.Context, ip string) (string, error) {
 					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to IPtoProviderIDFunc")
 					require.Equal(t, tc.responses[0].ip, ip)
@@ -206,7 +207,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 					tc.responses = tc.responses[1:]
 					return providerID, err
 				},
-			}, "", nil)
+			}, "")
 			i.ips = tc.ips
 			if tc.setup != nil {
 				tc.setup(i)
@@ -294,7 +295,8 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			i := newIPController(logrus.New(), &provider.MockProvider{
+			i := newIPController(logrus.New(), nil)
+			i.updateProvider(&provider.MockProvider{
 				AssignIPFunc: func(_ context.Context, ip string, providerID string) error {
 					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to AssignIPFunc")
 					require.Equal(t, tc.responses[0].ip, ip)
@@ -303,7 +305,7 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 					tc.responses = tc.responses[1:]
 					return err
 				},
-			}, "", nil)
+			}, "")
 			for _, ip := range tc.assignableIPs {
 				i.assignableIPs.Add(ip, true)
 			}
@@ -369,7 +371,7 @@ func TestIPControllerDisableNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			i := newIPController(logrus.New(), nil, "", nil)
+			i := newIPController(logrus.New(), nil)
 			if tc.setup != nil {
 				tc.setup(i)
 			}
@@ -416,7 +418,7 @@ func TestIPControllerEnableNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			i := newIPController(logrus.New(), nil, "", nil)
+			i := newIPController(logrus.New(), nil)
 			if tc.setup != nil {
 				tc.setup(i)
 			}

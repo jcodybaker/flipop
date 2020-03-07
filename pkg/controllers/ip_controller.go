@@ -99,7 +99,10 @@ func (i *ipController) start(ctx context.Context) {
 	}
 	i.wg.Add(1)
 	ctx, i.cancel = context.WithCancel(ctx)
-	go i.run(ctx)
+	go func() {
+		defer i.wg.Done()
+		i.run(ctx)
+	}()
 }
 
 func (i *ipController) stop() {
@@ -125,7 +128,7 @@ func (i *ipController) updateIPs(ips []string, desiredIPs int) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
 	var discarded []string
-	if len(ips) > desiredIPs {
+	if desiredIPs != 0 && len(ips) > desiredIPs {
 		discarded = ips[desiredIPs:]
 		ips = ips[0:desiredIPs]
 	}
@@ -246,10 +249,12 @@ func (i *ipController) reconcilePendingIPs(ctx context.Context) {
 		return // short-circuit on context cancel.
 	}
 	allIPs := append(append([]string{}, i.ips...), i.pendingIPs...)
-	err := i.onNewIPs(ctx, allIPs)
-	if err != nil {
-		i.ll.WithError(err).Error("updating IPs with caller")
-		return
+	if i.onNewIPs != nil {
+		err := i.onNewIPs(ctx, allIPs)
+		if err != nil {
+			i.ll.WithError(err).Error("updating IPs with caller")
+			return
+		}
 	}
 	for _, ip := range i.pendingIPs {
 		// shortcut lookup for ip provider

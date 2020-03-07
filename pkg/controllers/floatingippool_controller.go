@@ -97,6 +97,7 @@ func (c *FloatingIPPoolController) Run(ctx context.Context) {
 	c.ctx = ctx
 	informer.Run(ctx.Done())
 	c.poolLock.Lock()
+	defer c.poolLock.Lock()
 	for _, m := range c.pools {
 		// Our parent's canceling of the context should stop all of the children concurrently.
 		// This loop just verifies all children have completed.
@@ -111,7 +112,7 @@ func (c *FloatingIPPoolController) OnAdd(obj interface{}) {
 	if !ok {
 		c.ll.WithField("unexpected_type", fmt.Sprintf("%T", obj)).Warn("unexpected type")
 	}
-	c.updateOrAdd(k8sPool, true)
+	c.updateOrAdd(k8sPool)
 }
 
 // OnUpdate implements the shared informer ResourceEventHandler for FloatingIPPools.
@@ -120,10 +121,10 @@ func (c *FloatingIPPoolController) OnUpdate(_, newObj interface{}) {
 	if !ok {
 		c.ll.WithField("unexpected_type", fmt.Sprintf("%T", newObj)).Warn("unexpected type")
 	}
-	c.updateOrAdd(k8sPool, true)
+	c.updateOrAdd(k8sPool)
 }
 
-func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingIPPool, async bool) {
+func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingIPPool) {
 	c.poolLock.Lock()
 	defer c.poolLock.Unlock()
 	ll := c.ll.WithField("floating_ip_pool", fmt.Sprintf("%s/%s", k8sPool.Namespace, k8sPool.Name))
@@ -134,9 +135,10 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 		if !isValid {
 			return
 		}
+		ipc := newIPController(ll, nil)
 		pool = floatingIPPool{
-			matchController: newMatchController(ll, c.kubeCS),
-			ipController:    newIPController(ll, nil),
+			matchController: newMatchController(ll, c.kubeCS, ipc),
+			ipController:    ipc,
 		}
 		ll.Info("FloatingIPPool added; beginning reconciliation")
 		c.pools[k8sPool.GetSelfLink()] = pool
@@ -214,4 +216,8 @@ func (c *FloatingIPPoolController) OnDelete(obj interface{}) {
 	pool.matchController.stop()
 	pool.ipController.stop()
 	delete(c.pools, k8sPool.GetSelfLink())
+}
+
+func (c *FloatingIPPoolController) updateStatus() {
+
 }

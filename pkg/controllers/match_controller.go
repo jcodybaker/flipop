@@ -58,10 +58,11 @@ type matchController struct {
 	action nodeEnableDisabler
 }
 
-func newMatchController(ll logrus.FieldLogger, kubeCS kubernetes.Interface) *matchController {
+func newMatchController(ll logrus.FieldLogger, kubeCS kubernetes.Interface, action nodeEnableDisabler) *matchController {
 	m := &matchController{
 		ll:     ll,
 		kubeCS: kubeCS,
+		action: action,
 	}
 	m.reset()
 	return m
@@ -99,6 +100,7 @@ func (m *matchController) updateCriteria(match *flipopv1alpha1.Match) bool {
 	}
 	m.stop()
 	m.reset()
+	m.match = match.DeepCopy()
 
 	var err error
 	m.nodeSelector = nil
@@ -121,7 +123,7 @@ func (m *matchController) updateCriteria(match *flipopv1alpha1.Match) bool {
 		}
 	}
 	m.ll.Info("match criteria updated")
-	m.match = match.DeepCopy()
+
 	return true
 }
 
@@ -135,7 +137,7 @@ func podNodeNameIndexer(obj interface{}) ([]string, error) {
 
 func (m *matchController) run() {
 	defer m.wg.Done()
-	if m.match != nil {
+	if m.match == nil {
 		// The only way this should happen is if updateK8s was never called, or a match criteria
 		// passed validation with validateMatch, but then failed updateK8s.
 		m.ll.Warn("no match criteria set; cannot reconcile")
