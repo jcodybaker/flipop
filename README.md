@@ -9,7 +9,7 @@ Kubernetes nodes and the pods they host are ephemeral and replaced in case of fa
 ## Config
 
 ```
-apiVersion: flipop.codybaker.com/v1alpha1
+apiVersion: flipop.digitalocean.com/v1alpha1
 kind: FloatingIPPool
 metadata:
   name: ingress-pool

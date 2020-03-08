@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -30,7 +30,7 @@ package versioned
 import (
 	"fmt"
 
-	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1"
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"

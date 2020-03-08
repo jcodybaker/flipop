@@ -7,10 +7,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jcodybaker/flipop/pkg/controllers"
-	"github.com/jcodybaker/flipop/pkg/leaderelection"
-	"github.com/jcodybaker/flipop/pkg/log"
-	"github.com/jcodybaker/flipop/pkg/provider"
+	"github.com/digitalocean/flipop/pkg/controllers"
+	"github.com/digitalocean/flipop/pkg/leaderelection"
+	"github.com/digitalocean/flipop/pkg/log"
+	"github.com/digitalocean/flipop/pkg/provider"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 

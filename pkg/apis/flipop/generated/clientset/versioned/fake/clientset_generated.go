@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,9 +28,9 @@ SOFTWARE.
 package fake
 
 import (
-	clientset "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
-	flipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1"
-	fakeflipopv1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1/fake"
+	clientset "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned"
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1"
+	fakeflipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/typed/flipop/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"

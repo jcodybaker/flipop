@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -32,9 +32,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned"
-	flipop "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop"
-	internalinterfaces "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/informers/externalversions/internalinterfaces"
+	versioned "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned"
+	flipop "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop"
+	internalinterfaces "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/internalinterfaces"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"

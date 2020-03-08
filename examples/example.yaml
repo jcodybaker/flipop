@@ -1,4 +1,4 @@
-apiVersion: flipop.codybaker.com/v1alpha1
+apiVersion: flipop.digitalocean.com/v1alpha1
 kind: FloatingIPPool
 metadata:
   name: ingress-pool

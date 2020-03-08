@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -36,7 +36,7 @@ import (
 
 const (
 	// GroupName is the group name used in this package.
-	GroupName string = "flipop.codybaker.com"
+	GroupName string = "flipop.digitalocean.com"
 	// GroupVersion is the version.
 	GroupVersion string = "v1alpha1"
 )

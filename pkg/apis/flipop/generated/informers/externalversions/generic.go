@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -30,7 +30,7 @@ package externalversions
 import (
 	"fmt"
 
-	v1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
+	v1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 )
@@ -61,7 +61,7 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=flipop.codybaker.com, Version=v1alpha1
+	// Group=flipop.digitalocean.com, Version=v1alpha1
 	case v1alpha1.SchemeGroupVersion.WithResource("floatingippools"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Flipop().V1alpha1().FloatingIPPools().Informer()}, nil
 

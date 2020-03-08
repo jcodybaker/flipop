@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,8 +28,8 @@ SOFTWARE.
 package flipop
 
 import (
-	v1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop/v1alpha1"
-	internalinterfaces "github.com/jcodybaker/flipop/pkg/apis/flipop/generated/informers/externalversions/internalinterfaces"
+	v1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop/v1alpha1"
+	internalinterfaces "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/internalinterfaces"
 )
 
 // Interface provides access to each of this group's versions.

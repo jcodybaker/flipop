@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,8 +28,8 @@ SOFTWARE.
 package v1alpha1
 
 import (
-	"github.com/jcodybaker/flipop/pkg/apis/flipop/generated/clientset/versioned/scheme"
-	v1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
+	"github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/scheme"
+	v1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 	rest "k8s.io/client-go/rest"
 )
 
@@ -38,7 +38,7 @@ type FlipopV1alpha1Interface interface {
 	FloatingIPPoolsGetter
 }
 
-// FlipopV1alpha1Client is used to interact with features provided by the flipop.codybaker.com group.
+// FlipopV1alpha1Client is used to interact with features provided by the flipop.digitalocean.com group.
 type FlipopV1alpha1Client struct {
 	restClient rest.Interface
 }

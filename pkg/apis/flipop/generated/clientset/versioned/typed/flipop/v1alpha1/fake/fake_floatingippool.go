@@ -1,7 +1,7 @@
 /*
 MIT License
 
-Copyright (c) 2020 John Cody Baker
+Copyright (c) 2020 Digital Ocean Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -28,7 +28,7 @@ SOFTWARE.
 package fake
 
 import (
-	v1alpha1 "github.com/jcodybaker/flipop/pkg/apis/flipop/v1alpha1"
+	v1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
@@ -43,9 +43,9 @@ type FakeFloatingIPPools struct {
 	ns   string
 }
 
-var floatingippoolsResource = schema.GroupVersionResource{Group: "flipop.codybaker.com", Version: "v1alpha1", Resource: "floatingippools"}
+var floatingippoolsResource = schema.GroupVersionResource{Group: "flipop.digitalocean.com", Version: "v1alpha1", Resource: "floatingippools"}
 
-var floatingippoolsKind = schema.GroupVersionKind{Group: "flipop.codybaker.com", Version: "v1alpha1", Kind: "FloatingIPPool"}
+var floatingippoolsKind = schema.GroupVersionKind{Group: "flipop.digitalocean.com", Version: "v1alpha1", Kind: "FloatingIPPool"}
 
 // Get takes name of the floatingIPPool, and returns the corresponding floatingIPPool object, and an error if there is any.
 func (c *FakeFloatingIPPools) Get(name string, options v1.GetOptions) (result *v1alpha1.FloatingIPPool, err error) {
