@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/digitalocean/flipop/pkg/provider"
-
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/digitalocean/flipop/pkg/provider"
 )
 
 func TestIPControllerReconcileDesiredIPs(t *testing.T) {
@@ -197,7 +197,7 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			i := newIPController(logrus.New(), nil)
+			i := newIPController(logrus.New(), nil, nil)
 			i.updateProvider(&provider.MockProvider{
 				IPtoProviderIDFunc: func(_ context.Context, ip string) (string, error) {
 					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to IPtoProviderIDFunc")
@@ -295,7 +295,7 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			i := newIPController(logrus.New(), nil)
+			i := newIPController(logrus.New(), nil, nil)
 			i.updateProvider(&provider.MockProvider{
 				AssignIPFunc: func(_ context.Context, ip string, providerID string) error {
 					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to AssignIPFunc")
@@ -371,7 +371,7 @@ func TestIPControllerDisableNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			i := newIPController(logrus.New(), nil)
+			i := newIPController(logrus.New(), nil, nil)
 			if tc.setup != nil {
 				tc.setup(i)
 			}
@@ -419,7 +419,7 @@ func TestIPControllerEnableNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			i := newIPController(logrus.New(), nil)
+			i := newIPController(logrus.New(), nil, nil)
 			if tc.setup != nil {
 				tc.setup(i)
 			}

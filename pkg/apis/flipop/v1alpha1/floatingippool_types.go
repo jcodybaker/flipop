@@ -20,6 +20,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	// IPStateActive indicates an IP is assigned to a matching node.
+	IPStateActive IPState = "active"
+	// IPStateInProgress indicates an action against the IP is in progress.
+	IPStateInProgress IPState = "in-progress"
+	// IPStateError indicates the last action against the IP failed.
+	IPStateError IPState = "error"
+	// IPStateNoMatch indicates the ip is assigned, but the target node is not matching.
+	IPStateNoMatch IPState = "no-match"
+	// IPStateUnassigned indicates the ip is currently unassigned.
+	IPStateUnassigned IPState = "unassigned"
+	// IPStateDisabled indicates the IP is beyond the desiredIPs limit, and temporarily disabled.
+	IPStateDisabled IPState = "disabled"
+)
+
 // FloatingIPPoolSpec defines the desired state of FloatingIPPool
 type FloatingIPPoolSpec struct {
 	IPs []string `json:"ips"`
@@ -56,28 +71,22 @@ type Match struct {
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
-// Target describes a kubernetes resource.
-type Target struct {
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace,omitempty"`
-	Kind       string `json:"kind"`
-	APIVersion string `json:"apiVersion"`
-}
-
 // FloatingIPPoolStatus defines the observed state of FloatingIPPool.
 type FloatingIPPoolStatus struct {
 	IPs   map[string]IPStatus `json:"ips,omitempty"`
 	Error string              `json:"error,omitempty"`
 }
 
+// IPState describes the condition of an IP.
+type IPState string
+
 // IPStatus describes the mapping between IPs and the matching
 // resources responsible for their attachment.
 type IPStatus struct {
-	IP         string   `json:"ip"`
-	NodeName   string   `json:"nodeName"`
-	ProviderID string   `json:"dropletID"`
-	Targets    []Target `json:"targets,omitempty"`
-	Error      string   `json:"error"`
+	State      IPState `json:"state"`
+	NodeName   string  `json:"nodeName"`
+	ProviderID string  `json:"providerID"`
+	Error      string  `json:"error"`
 }
 
 // +genclient

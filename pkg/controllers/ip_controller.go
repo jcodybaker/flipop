@@ -8,9 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
+
 	corev1 "k8s.io/api/core/v1"
+
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
+	"github.com/digitalocean/flipop/pkg/provider"
 )
 
 const (
@@ -21,18 +24,22 @@ var (
 	healthyRetrySchedule = provider.RetrySchedule{5 * time.Minute}
 )
 
-// NewIPFunc describes a callback used when the list of IPs is updated.
-type NewIPFunc func(ctx context.Context, ips []string) error
+// newIPFunc describes a callback used when the list of IPs is updated.
+type newIPFunc func(ctx context.Context, ips []string) error
+
+// statusUpdateFunc describes a callback when the ip/node assignment status should be updated.
+type statusUpdateFunc func(ctx context.Context, status flipopv1alpha1.FloatingIPPoolStatus) error
 
 type ipController struct {
 	provider provider.Provider
 	region   string
 
-	desiredIPs int
-	ips        []string
-	pendingIPs []string
+	desiredIPs  int
+	disabledIPs []string
+	ips         []string
+	pendingIPs  []string
 
-	onNewIPs NewIPFunc
+	onNewIPs newIPFunc
 
 	ll       logrus.FieldLogger
 	cancel   context.CancelFunc
@@ -45,6 +52,7 @@ type ipController struct {
 	createRetrySchedule provider.RetrySchedule
 	createAttempts      int
 	createNextRetry     time.Time
+	createError         string
 
 	// ipToStatus tracks each IP address, including its current assignment, errors, and retries.
 	ipToStatus map[string]*ipStatus
@@ -59,12 +67,16 @@ type ipController struct {
 
 	assignableIPs   *orderedSet
 	assignableNodes *orderedSet
+
+	updateStatus   bool
+	onStatusUpdate statusUpdateFunc
 }
 
 type ipStatus struct {
 	retry
 	message        string
 	nodeProviderID string
+	state          flipopv1alpha1.IPState
 }
 
 type retry struct {
@@ -74,11 +86,12 @@ type retry struct {
 }
 
 // newIPController initializes an ipController.
-func newIPController(ll logrus.FieldLogger, onNewIPs NewIPFunc) *ipController {
+func newIPController(ll logrus.FieldLogger, onNewIPs newIPFunc, onStatusUpdate statusUpdateFunc) *ipController {
 	i := &ipController{
-		ll:       ll,
-		onNewIPs: onNewIPs,
-		pokeChan: make(chan struct{}, 1),
+		ll:             ll,
+		onNewIPs:       onNewIPs,
+		onStatusUpdate: onStatusUpdate,
+		pokeChan:       make(chan struct{}, 1),
 	}
 	i.reset()
 	return i
@@ -127,9 +140,9 @@ func (i *ipController) updateProvider(prov provider.Provider, region string) boo
 func (i *ipController) updateIPs(ips []string, desiredIPs int) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
-	var discarded []string
+	i.disabledIPs = nil
 	if desiredIPs != 0 && len(ips) > desiredIPs {
-		discarded = ips[desiredIPs:]
+		i.disabledIPs = ips[desiredIPs:]
 		ips = ips[0:desiredIPs]
 	}
 	if reflect.DeepEqual(ips, i.ips) &&
@@ -137,8 +150,9 @@ func (i *ipController) updateIPs(ips []string, desiredIPs int) {
 		i.desiredIPs = desiredIPs
 		return
 	}
-	if len(discarded) != 0 { // only log if the spec changed.
-		i.ll.WithField("ips", discarded).Warn("update desiredIPs < len(ips); some IPs will be ignored")
+	i.updateStatus = true
+	if len(i.disabledIPs) != 0 { // only log if the spec changed.
+		i.ll.WithField("ips", i.disabledIPs).Warn("update desiredIPs < len(ips); some IPs will be disabled")
 	}
 
 	// We really only care about removed IPs. The reconciler will take care of adding new ones.
@@ -206,6 +220,7 @@ func (i *ipController) retryTimerDuration() time.Duration {
 func (i *ipController) reconcile(ctx context.Context) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
+
 	i.nextRetry = time.Now().Add(reconcilePeriod)
 
 	i.reconcileDesiredIPs(ctx)
@@ -213,6 +228,14 @@ func (i *ipController) reconcile(ctx context.Context) {
 	i.reconcileIPStatus(ctx)
 	i.reconcileAssignment(ctx)
 
+	if i.updateStatus && i.onStatusUpdate != nil {
+		err := i.onStatusUpdate(ctx, i.buildStatusUpdate())
+		if err != nil {
+			i.ll.WithError(err).Error("updating status")
+			return
+		}
+		i.updateStatus = false
+	}
 }
 
 func (i *ipController) retry(next time.Time) {
@@ -231,16 +254,21 @@ func (i *ipController) reconcileDesiredIPs(ctx context.Context) {
 	}
 	// Acquire new IPs if needed. If this fails, we can try again next reconcile.
 	for j := len(i.ips); j < i.desiredIPs; j++ {
+		i.ll.Info("requesting ip from provider")
+		i.updateStatus = true
 		ip, err := i.provider.CreateIP(ctx, i.region)
 		if err != nil {
 			i.createRetrySchedule = provider.ErrorToRetrySchedule(err)
 			i.createAttempts, i.createNextRetry = i.createRetrySchedule.Next(i.createAttempts)
 			i.retry(i.createNextRetry)
 			i.ll.WithError(err).Error("requesting new IP from provider")
+			i.createError = fmt.Sprintf("creating new ip with provider: %s", err)
 			return
 		}
+		i.ll.WithField("ip", ip).Info("created new ip with provider")
 		i.pendingIPs = append(i.pendingIPs, ip)
 		i.createAttempts = 0
+		i.createError = ""
 	}
 }
 
@@ -248,19 +276,25 @@ func (i *ipController) reconcilePendingIPs(ctx context.Context) {
 	if ctx.Err() != nil {
 		return // short-circuit on context cancel.
 	}
+	if len(i.pendingIPs) == 0 {
+		return
+	}
 	allIPs := append(append([]string{}, i.ips...), i.pendingIPs...)
 	if i.onNewIPs != nil {
+		ll := i.ll.WithField("ips", i.pendingIPs)
+		ll.Info("updating IPs with caller")
 		err := i.onNewIPs(ctx, allIPs)
 		if err != nil {
-			i.ll.WithError(err).Error("updating IPs with caller")
+			ll.WithError(err).Error("updating IPs with caller")
 			return
 		}
 	}
+	i.updateStatus = true
 	for _, ip := range i.pendingIPs {
 		// shortcut lookup for ip provider
 		i.ipToStatus[ip] = &ipStatus{
-			retry:   retry{retrySchedule: healthyRetrySchedule},
-			message: "available",
+			retry: retry{retrySchedule: healthyRetrySchedule},
+			state: flipopv1alpha1.IPStateUnassigned,
 		}
 		// This IP is empty and should be a priority for assignment, put it at the front.
 		i.assignableIPs.Add(ip, true)
@@ -287,6 +321,9 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 			continue
 		}
 
+		originalState := status.state
+		originalMessage := status.message
+
 		expectedProviderID := status.nodeProviderID
 		ll := i.ll.WithField("ip", ip)
 		ll.Debug("retrieving IP current provider ID")
@@ -306,11 +343,20 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 					i.assignableIPs.Delete(ip)
 				}
 			}
+			if err == provider.ErrInProgress {
+				status.state = flipopv1alpha1.IPStateInProgress
+				status.message = ""
+			} else {
+				status.state = flipopv1alpha1.IPStateError
+				status.message = fmt.Sprintf("retrieving IPs current provider ID: %s", err)
+			}
 			status.retrySchedule = provider.ErrorToRetrySchedule(err)
 			status.attempts, status.nextRetry = status.retrySchedule.Next(status.attempts)
-			status.message = fmt.Sprintf("retrieving IPs current provider ID: %s", err)
 			i.retry(status.nextRetry)
 			ll.WithError(err).Error("retrieving IPs current provider ID")
+			if originalState != status.state || originalMessage != status.message {
+				i.updateStatus = true
+			}
 			continue
 		}
 		ll = ll.WithField("provider_id", providerID)
@@ -350,6 +396,7 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 				i.assignableIPs.Add(expectedIP, false)
 				// mark the node's old IP for immediate retry.
 				i.ipToStatus[expectedIP] = &ipStatus{
+					state:          flipopv1alpha1.IPStateError,
 					retry:          retry{retrySchedule: provider.RetryFast},
 					message:        "state unknown; cache / provider mismatch",
 					nodeProviderID: "", // reset
@@ -367,10 +414,21 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 			}
 		}
 
+		switch {
+		case status.nodeProviderID != "" && i.providerIDToNodeName[status.nodeProviderID] != "":
+			status.state = flipopv1alpha1.IPStateActive
+		case status.nodeProviderID != "":
+			status.state = flipopv1alpha1.IPStateNoMatch
+		default:
+			status.state = flipopv1alpha1.IPStateUnassigned
+		}
 		status.message = ""
 		status.attempts = 0
 		status.retrySchedule = healthyRetrySchedule
 		_, status.nextRetry = status.retrySchedule.Next(status.attempts)
+		if originalState != status.state || originalMessage != status.message {
+			i.updateStatus = true
+		}
 		ll.Debug("provider ip mapping verified")
 	}
 }
@@ -414,6 +472,9 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 			continue
 		}
 
+		originalState := status.state
+		originalMessage := status.message
+
 		oldProviderID := status.nodeProviderID
 		// This IP may have been released by a different node. We gave the old node a chance to
 		// recover, but this new node needs an IP. Remove the old node's claim it one exists.
@@ -431,11 +492,13 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 
 		err := i.provider.AssignIP(ctx, ip, providerID)
 		if err == nil || err == provider.ErrInProgress {
-			status.message = "pending verification"
+			status.message = ""
+			status.state = flipopv1alpha1.IPStateInProgress
 			status.retrySchedule = provider.RetryFast
 			delete(i.providerIDToRetry, providerID)
 			_, status.nextRetry = status.retrySchedule.Next(status.attempts)
 		} else {
+			status.state = flipopv1alpha1.IPStateError
 			status.retrySchedule = provider.ErrorToRetrySchedule(err)
 			status.message = fmt.Sprintf("assigning IP to node: %s", err)
 			ll.WithError(err).Error("assigning IP to node")
@@ -447,6 +510,9 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 			i.retry(nRetry.nextRetry)
 		}
 		i.retry(status.nextRetry)
+		if originalState != status.state || originalMessage != status.message {
+			i.updateStatus = true
+		}
 	}
 }
 
@@ -464,6 +530,7 @@ func (i *ipController) DisableNode(node *corev1.Node) {
 		"node":        node.Name,
 		"provider_id": providerID,
 	})
+	i.updateStatus = true
 	delete(i.providerIDToNodeName, providerID)
 	if ip := i.providerIDToIP[providerID]; ip != "" {
 		// Add this IP to the back of the list. This increases the chances that the IP mapping
@@ -492,6 +559,7 @@ func (i *ipController) EnableNode(node *corev1.Node) {
 		return // Already enabled.
 	}
 	i.poke()
+	i.updateStatus = true
 	i.providerIDToNodeName[providerID] = node.Name
 	ll := i.ll.WithFields(logrus.Fields{
 		"node":        node.Name,
@@ -511,6 +579,27 @@ func (i *ipController) poke() {
 	case i.pokeChan <- struct{}{}:
 	default: // if there's already a poke in queued, we don't need another.
 	}
+}
+
+func (i *ipController) buildStatusUpdate() flipopv1alpha1.FloatingIPPoolStatus {
+	status := flipopv1alpha1.FloatingIPPoolStatus{
+		IPs:   make(map[string]flipopv1alpha1.IPStatus),
+		Error: i.createError,
+	}
+	for ip, ipStatus := range i.ipToStatus {
+		status.IPs[ip] = flipopv1alpha1.IPStatus{
+			ProviderID: ipStatus.nodeProviderID,
+			NodeName:   i.providerIDToNodeName[ipStatus.nodeProviderID],
+			State:      ipStatus.state,
+			Error:      ipStatus.message,
+		}
+	}
+	for _, ip := range i.disabledIPs {
+		status.IPs[ip] = flipopv1alpha1.IPStatus{
+			State: flipopv1alpha1.IPStateDisabled,
+		}
+	}
+	return status
 }
 
 type orderedSet struct {

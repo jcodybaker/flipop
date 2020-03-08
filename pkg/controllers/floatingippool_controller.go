@@ -31,19 +31,17 @@ import (
 	"reflect"
 	"sync"
 
-	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
 
-	flipopCS "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned"
-
-	// k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	// metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
+	flipopCS "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned"
 	flipopInformers "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop/v1alpha1"
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 )
 
 // FloatingIPPoolController watches for FloatingIPPool and then manages reconciliation for each
@@ -135,7 +133,9 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 		if !isValid {
 			return
 		}
-		ipc := newIPController(ll, nil)
+		ipc := newIPController(ll,
+			c.ipUpdater(ll, k8sPool.Name, k8sPool.Namespace),
+			c.statusUpdater(ll, k8sPool.Name, k8sPool.Namespace))
 		pool = floatingIPPool{
 			matchController: newMatchController(ll, c.kubeCS, ipc),
 			ipController:    ipc,
@@ -218,5 +218,45 @@ func (c *FloatingIPPoolController) updateStatus(k8sPool *flipopv1alpha1.Floating
 	_, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8sPool.Namespace).UpdateStatus(k8sPool)
 	if err != nil {
 		c.ll.WithError(err).Error("updating FloatingIPPool status")
+	}
+}
+
+func (c *FloatingIPPoolController) statusUpdater(ll logrus.FieldLogger, name, namespace string) statusUpdateFunc {
+	return func(ctx context.Context, status flipopv1alpha1.FloatingIPPoolStatus) error {
+		// This GET doesn't seem strictly necessary as the status subresource should update even
+		// if our local resource id is stale. Nevertheless, tests using the fake client fail
+		// without it. Err on the side of caution until we get this resolved.
+		k8s, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(namespace).Get(name, metav1.GetOptions{})
+		if err != nil {
+			c.ll.WithError(err).Error("loading FloatingIPPool status")
+			return fmt.Errorf("loading FloatingIPPool: %w", err)
+		}
+		if reflect.DeepEqual(status, k8s.Status) {
+			return nil
+		}
+		k8s.Status = status
+		_, err = c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8s.Namespace).UpdateStatus(k8s)
+		if err != nil {
+			ll.WithError(err).Error("updating FloatingIPPool status")
+			return fmt.Errorf("updating FloatingIPPool status: %w", err)
+		}
+		return nil
+	}
+}
+
+func (c *FloatingIPPoolController) ipUpdater(ll logrus.FieldLogger, name, namespace string) newIPFunc {
+	return func(ctx context.Context, ips []string) error {
+		k8s, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(namespace).Get(name, metav1.GetOptions{})
+		if err != nil {
+			c.ll.WithError(err).Error("loading FloatingIPPool status")
+			return fmt.Errorf("loading FloatingIPPool: %w", err)
+		}
+		k8s.Spec.IPs = ips
+		_, err = c.flipopCS.FlipopV1alpha1().FloatingIPPools(namespace).Update(k8s)
+		if err != nil {
+			ll.WithError(err).Error("updating FloatingIPPool status")
+			return fmt.Errorf("updating FloatingIPPool: %w", err)
+		}
+		return nil
 	}
 }

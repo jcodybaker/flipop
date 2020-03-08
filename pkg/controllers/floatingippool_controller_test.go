@@ -5,16 +5,16 @@ import (
 	"testing"
 	"time"
 
-	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
-	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 
-	flipCSFake "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/fake"
-
-	kubeCSFake "k8s.io/client-go/kubernetes/fake"
+	"github.com/digitalocean/flipop/pkg/provider"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeCSFake "k8s.io/client-go/kubernetes/fake"
+
+	flipCSFake "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned/fake"
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 )
 
 // These tests try to approximate an end-to-end workflow.  The ipController and matchController
@@ -257,6 +257,10 @@ func TestFloatingIPPoolUpdateK8s(t *testing.T) {
 			require.Len(t, ipAssignment, tc.expectAssignedIPs)
 			require.Equal(t, tc.expectAssignableIPs, f.ipController.assignableIPs.Len())
 			require.Equal(t, tc.expectAssignableNodes, f.ipController.assignableNodes.Len())
+
+			updatedK8s, err := c.flipopCS.FlipopV1alpha1().FloatingIPPools(k8s.Namespace).Get(k8s.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, f.ipController.ips, updatedK8s.Spec.IPs)
 		})
 	}
 }

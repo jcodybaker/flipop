@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
+
+	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 )
 
 type mockNodeEnableDisabler struct {
@@ -201,7 +202,7 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 	}
 }
 
-func TestUpdatePod(t *testing.T) {
+func TestMatchControllerUpdatePod(t *testing.T) {
 	tcs := []struct {
 		name                string
 		initialIPAssignment map[string]string
@@ -251,18 +252,6 @@ func TestUpdatePod(t *testing.T) {
 			}
 
 			require.ElementsMatch(t, tc.expectEnabledNodes, nMock.names())
-		})
-	}
-}
-
-func TestMatchControllerUpdatePod(t *testing.T) {
-	tcs := []struct {
-		name string
-	}{}
-	for _, tc := range tcs {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-
 		})
 	}
 }
