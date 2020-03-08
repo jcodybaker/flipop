@@ -394,41 +394,6 @@ func (m *matchController) deletePod(pod *corev1.Pod) {
 	}
 }
 
-func (m *matchController) setStatus(ctx context.Context, errMsg string) error {
-	// status := flipopv1alpha1.FloatingIPPoolStatus{
-	// 	IPs: make(map[string]flipopv1alpha1.IPStatus),
-	// }
-	// for ip, n := range m.ipToNode {
-	// 	ipStatus := &flipopv1alpha1.IPStatus{
-	// 		Error: m.ipToError[ip],
-	// 	}
-	// 	if n != nil {
-	// 		ipStatus.NodeName = n.getName()
-	// 		ipStatus.ProviderID = n.getProviderID()
-	// 		for _, pod := range n.matchingPods {
-	// 			ipStatus.Targets = append(ipStatus.Targets, flipopv1alpha1.Target{
-	// 				APIVersion: pod.APIVersion,
-	// 				Kind:       pod.Kind,
-	// 				Name:       pod.Name,
-	// 				Namespace:  pod.Namespace,
-	// 			})
-	// 		}
-	// 	}
-	// 	status.IPs[ip] = *ipStatus
-	// }
-	// status.Error = errMsg
-	// m.k8s.Status = status
-	// // We discard the returned status. If we updated here, we might also get spec changes which
-	// // have not yet been processed via FloatingIPPoolController's updateOrAdd(), and therefore
-	// // have not yet been reconciled.
-	// _, err := m.flipopCS.FlipopV1alpha1().FloatingIPPools(m.k8s.Namespace).UpdateStatus(m.k8s)
-	// if err != nil {
-	// 	m.ll.WithError(err).WithField("namespace", m.k8s.Namespace).Error("failed to update status")
-	// }
-	// return err
-	return nil
-}
-
 func (m *matchController) isNodeMatch(n *node) bool {
 	var ready bool
 	for _, c := range n.k8sNode.Status.Conditions {

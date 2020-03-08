@@ -399,10 +399,11 @@ func TestIPControllerEnableNode(t *testing.T) {
 			expectAssignable: true,
 		},
 		{
-			name:             "assignable",
+			name:             "already assignable",
 			expectAssignable: true,
 			setup: func(i *ipController) {
 				i.providerIDToIP["mock://1"] = ""
+				i.assignableNodes.Add("mock://1", true)
 				i.providerIDToNodeName["mock://1"] = "hello-world"
 			},
 		},
