@@ -36,7 +36,5 @@ kubectl apply -f k8s/*
 This operator is concerned with the relationships between FloatingIPPool, Node, and Pod resources. The controller-runtime (leveraged by kubebuilder) and operator-framework assume related objects are owned by the controller objects. OwnerReferences trigger garbage collection, which is a non-starter for this use-case. Deleting a FloatingIPPool shouldn't delete the Pods and Nodes its concerned with. The controller-runtime also assumes we're interested in all resources we "own". While controllers can be constrained with label selectors and namespaces, controllers can only be added to manager, not removed. In the case of this controller, we're likely only interested a small subset of pods and nodes, but those subscriptions may change based upon the definition in the FloatingIPPool resource.
 
 ## TODO
-- __API Rate Limiting__ - The DO API has rate limiting. We should handle rate-limit errors better.
 - __Grace-periods__ - Moving IPs has a cost. It breaks all active connections, has a momentary period where connections will fail, and risks errors.  In some cases it may be better to give the node a chance to recover.
-- __IP Allocation__ - 
 - __DNS__ - 

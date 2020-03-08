@@ -599,6 +599,16 @@ func (i *ipController) buildStatusUpdate() flipopv1alpha1.FloatingIPPoolStatus {
 			State: flipopv1alpha1.IPStateDisabled,
 		}
 	}
+	for providerID := range i.providerIDToRetry {
+		nodeName, ok := i.providerIDToNodeName[providerID]
+		if !ok {
+			continue
+		}
+		status.NodeErrors = append(status.NodeErrors, nodeName)
+	}
+	for _, providerID := range i.assignableNodes.AsList() {
+		status.AssignableNodes = append(status.AssignableNodes, i.providerIDToNodeName[providerID])
+	}
 	return status
 }
 
@@ -666,4 +676,13 @@ func (o *orderedSet) IsSet(v string) bool {
 		return false
 	}
 	return true
+}
+
+// AsList returns all items in the set.
+func (o *orderedSet) AsList() []string {
+	var out []string
+	for _, e := range o.m {
+		out = append(out, e.Value.(string))
+	}
+	return out
 }

@@ -65,27 +65,20 @@ spec:
                   additionalProperties:
                     type: object
                     properties:
-                      ip: 
-                        type: string
                       nodeName:
                         type: string
                       providerID:
                         type: string
                       error:
                         type: string
-                      targets:
-                        type: array
-                        items:
-                          type: object
-                          properties:
-                            name: 
-                              type: string
-                            namespace:
-                              type: string
-                            kind:
-                              type: string
-                            apiVersion: 
-                              type: string
+                nodeErrors:
+                  type: array
+                  items:
+                    type: string
+                assignableNodes:
+                  type: array
+                  items:
+                    type: string
   scope: Namespaced
   names:
     kind: FloatingIPPool

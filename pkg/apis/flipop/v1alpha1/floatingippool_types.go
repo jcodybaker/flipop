@@ -73,8 +73,10 @@ type Match struct {
 
 // FloatingIPPoolStatus defines the observed state of FloatingIPPool.
 type FloatingIPPoolStatus struct {
-	IPs   map[string]IPStatus `json:"ips,omitempty"`
-	Error string              `json:"error,omitempty"`
+	IPs             map[string]IPStatus `json:"ips,omitempty"`
+	NodeErrors      []string            `json:"nodeErrors,omitempty"`
+	AssignableNodes []string            `json:"assignableNodes,omitempty"`
+	Error           string              `json:"error,omitempty"`
 }
 
 // IPState describes the condition of an IP.
