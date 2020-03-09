@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/digitalocean/flipop/pkg/controllers"
+	"github.com/digitalocean/flipop/pkg/floatingip"
 	"github.com/digitalocean/flipop/pkg/leaderelection"
 	"github.com/digitalocean/flipop/pkg/log"
 	"github.com/digitalocean/flipop/pkg/provider"
@@ -85,7 +85,7 @@ func runMain(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(os.Stdout, "No providers initialized. Set DIGITALOCEAN_ACCESS_TOKEN\n")
 		os.Exit(1)
 	}
-	flipCtrl, err := controllers.NewFloatingIPPoolController(config, providers, ll)
+	flipCtrl, err := floatingip.NewFloatingIPPoolController(config, providers, ll)
 	if err != nil {
 		fmt.Fprintf(os.Stdout, "Failed to create Floating IP Pool controller: %s\n", err)
 		os.Exit(1)

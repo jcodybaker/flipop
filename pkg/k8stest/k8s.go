@@ -1,4 +1,4 @@
-package controllers
+package k8stest
 
 import (
 	"fmt"
@@ -11,7 +11,7 @@ import (
 	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
 )
 
-var podTolerations = []corev1.Toleration{
+var PodTolerations = []corev1.Toleration{
 	corev1.Toleration{
 		Key:      "shields",
 		Value:    "down",
@@ -26,31 +26,31 @@ var podTolerations = []corev1.Toleration{
 	},
 }
 
-var matchingPodLabels = labels.Set(map[string]string{
+var MatchingPodLabels = labels.Set(map[string]string{
 	"vessel": "runabout",
 	"class":  "danube",
 })
 
-var matchingNodeLabels = labels.Set(map[string]string{
+var MatchingNodeLabels = labels.Set(map[string]string{
 	"system":   "bajor",
 	"quadrant": "alpha",
 })
 
-func setLabels(l labels.Set) func(metav1.Object) metav1.Object {
+func SetLabels(l labels.Set) func(metav1.Object) metav1.Object {
 	return func(o metav1.Object) metav1.Object {
 		o.SetLabels(l)
 		return o
 	}
 }
 
-var noSchedule = []corev1.Taint{
+var NoSchedule = []corev1.Taint{
 	corev1.Taint{
 		Key:    "node.kubernetes.io/unschedulable",
 		Effect: corev1.TaintEffectNoSchedule,
 	},
 }
 
-func setTaints(t []corev1.Taint) func(metav1.Object) metav1.Object {
+func SetTaints(t []corev1.Taint) func(metav1.Object) metav1.Object {
 	return func(o metav1.Object) metav1.Object {
 		n := o.(*corev1.Node)
 		n.Spec.Taints = t
@@ -58,7 +58,7 @@ func setTaints(t []corev1.Taint) func(metav1.Object) metav1.Object {
 	}
 }
 
-func makePod(name, nodeName string, manipulations ...func(pod metav1.Object) metav1.Object) *corev1.Pod {
+func MakePod(name, nodeName string, manipulations ...func(pod metav1.Object) metav1.Object) *corev1.Pod {
 	var p metav1.Object = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -87,7 +87,7 @@ func makePod(name, nodeName string, manipulations ...func(pod metav1.Object) met
 	return p.(*corev1.Pod)
 }
 
-func makeNode(name, providerID string, manipulations ...func(node metav1.Object) metav1.Object) *corev1.Node {
+func MakeNode(name, providerID string, manipulations ...func(node metav1.Object) metav1.Object) *corev1.Node {
 	var n metav1.Object = &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -116,7 +116,7 @@ func makeNode(name, providerID string, manipulations ...func(node metav1.Object)
 	return n.(*corev1.Node)
 }
 
-func markReady(o metav1.Object) metav1.Object {
+func MarkReady(o metav1.Object) metav1.Object {
 	switch r := o.(type) {
 	case *corev1.Node:
 		r.Status.Conditions = []corev1.NodeCondition{
@@ -138,37 +138,37 @@ func markReady(o metav1.Object) metav1.Object {
 	return o
 }
 
-func markRunning(o metav1.Object) metav1.Object {
+func MarkRunning(o metav1.Object) metav1.Object {
 	pod := o.(*corev1.Pod)
 	pod.Status.Phase = corev1.PodRunning
 	return pod
 }
 
-func markDeleting(o metav1.Object) metav1.Object {
+func MarkDeleting(o metav1.Object) metav1.Object {
 	now := metav1.Now()
 	o.SetDeletionTimestamp(&now)
 	return o
 }
 
-func setNamespace(ns string) func(o metav1.Object) metav1.Object {
+func SetNamespace(ns string) func(o metav1.Object) metav1.Object {
 	return func(o metav1.Object) metav1.Object {
 		o.SetNamespace(ns)
 		return o
 	}
 }
 
-func asRuntimeObjects(in []metav1.Object) (out []runtime.Object) {
+func AsRuntimeObjects(in []metav1.Object) (out []runtime.Object) {
 	for _, m := range in {
 		out = append(out, m.(runtime.Object))
 	}
 	return out
 }
 
-func makeMatch() flipopv1alpha1.Match {
+func MakeMatch() flipopv1alpha1.Match {
 	return flipopv1alpha1.Match{
 		NodeLabel:    "system=bajor",
 		PodNamespace: "star-fleet",
 		PodLabel:     "vessel=runabout,class=danube",
-		Tolerations:  podTolerations,
+		Tolerations:  PodTolerations,
 	}
 }

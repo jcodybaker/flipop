@@ -1,4 +1,4 @@
-package controllers
+package nodematch
 
 import (
 	"context"
@@ -22,18 +22,17 @@ import (
 )
 
 const (
-	floatingIPPoolResyncPeriod = 5 * time.Minute
-	podResyncPeriod            = 5 * time.Minute
-	nodeResyncPeriod           = 5 * time.Minute
-	podNodeNameIndexerName     = "podNodeName"
+	podResyncPeriod        = 5 * time.Minute
+	nodeResyncPeriod       = 5 * time.Minute
+	podNodeNameIndexerName = "podNodeName"
 )
 
-type nodeEnableDisabler interface {
-	EnableNode(*corev1.Node)
-	DisableNode(*corev1.Node)
+type NodeEnableDisabler interface {
+	EnableNodes(...*corev1.Node)
+	DisableNodes(...*corev1.Node)
 }
 
-type matchController struct {
+type Controller struct {
 	match *flipopv1alpha1.Match
 	// cache the parsed selectors
 	nodeSelector labels.Selector
@@ -55,11 +54,11 @@ type matchController struct {
 
 	sync.Mutex
 
-	action nodeEnableDisabler
+	action NodeEnableDisabler
 }
 
-func newMatchController(ll logrus.FieldLogger, kubeCS kubernetes.Interface, action nodeEnableDisabler) *matchController {
-	m := &matchController{
+func NewController(ll logrus.FieldLogger, kubeCS kubernetes.Interface, action NodeEnableDisabler) *Controller {
+	m := &Controller{
 		ll:     ll,
 		kubeCS: kubeCS,
 		action: action,
@@ -68,7 +67,7 @@ func newMatchController(ll logrus.FieldLogger, kubeCS kubernetes.Interface, acti
 	return m
 }
 
-func (m *matchController) start(ctx context.Context) {
+func (m *Controller) Start(ctx context.Context) {
 	if m.cancel != nil {
 		return // already running.
 	}
@@ -77,7 +76,7 @@ func (m *matchController) start(ctx context.Context) {
 	go m.run()
 }
 
-func (m *matchController) stop() {
+func (m *Controller) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
@@ -85,20 +84,14 @@ func (m *matchController) stop() {
 	m.wg.Wait()
 }
 
-func (m *matchController) reset() {
-	m.nodeNameToNode = make(map[string]*node)
-	m.primed = false
-	m.nodeInformer = nil
-}
-
 // updateCriteria sets the match criteria based on the match spec. If the criteria has changed
 // any current reconciliation is stopped, and the match criteria are updated, and we return true.
 // If the criteria are unchanged, execution will continue, and false is returned.
-func (m *matchController) updateCriteria(match *flipopv1alpha1.Match) bool {
+func (m *Controller) UpdateCriteria(match *flipopv1alpha1.Match) bool {
 	if m.match != nil && reflect.DeepEqual(match, m.match) {
 		return false
 	}
-	m.stop()
+	m.Stop()
 	m.reset()
 	m.match = match.DeepCopy()
 
@@ -127,6 +120,12 @@ func (m *matchController) updateCriteria(match *flipopv1alpha1.Match) bool {
 	return true
 }
 
+func (m *Controller) reset() {
+	m.nodeNameToNode = make(map[string]*node)
+	m.primed = false
+	m.nodeInformer = nil
+}
+
 func podNodeNameIndexer(obj interface{}) ([]string, error) {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok || pod == nil {
@@ -135,7 +134,7 @@ func podNodeNameIndexer(obj interface{}) ([]string, error) {
 	return []string{pod.Spec.NodeName}, nil
 }
 
-func (m *matchController) run() {
+func (m *Controller) run() {
 	defer m.wg.Done()
 	if m.match == nil {
 		// The only way this should happen is if updateK8s was never called, or a match criteria
@@ -203,35 +202,35 @@ func (m *matchController) run() {
 		}
 		return
 	}
-	m.Lock()
-	m.primed = true
-	m.Unlock()
 	// After the caches are sync'ed we need to loop through nodes again, otherwise pods which were
 	// added before the node was known may be missing.
-	m.resync()
-}
-
-func (m *matchController) resync() {
-	m.Lock()
-	defer m.Unlock()
-	if !m.primed {
-		return // initial sync is still pending
-	}
 	for _, o := range m.nodeInformer.GetStore().List() {
 		k8sNode, ok := o.(*corev1.Node)
 		if !ok {
 			m.ll.Error("node informer store produced non-node")
 			continue
 		}
-		err := m.updateNode(m.ctx, k8sNode)
+		err := m.UpdateNode(m.ctx, k8sNode)
 		if err != nil {
 			m.ll.WithError(err).Error("updating node")
 		}
 	}
-	m.ll.Info("synchronized")
+	m.Lock()
+	defer m.Unlock()
+	// We enable the initial set of nodes in bulk. This helps minimize chaos as the action can
+	// apply these changes as a single update, and hopefully avoid disabling or moving nodes
+	// which are active but not yet seen.
+	var enable []*corev1.Node
+	for _, n := range m.nodeNameToNode {
+		if n.enabled {
+			enable = append(enable, n.k8sNode)
+		}
+	}
+	m.action.EnableNodes(enable...)
+	m.primed = true
 }
 
-func (m *matchController) getNodePods(nodeName string) ([]*corev1.Pod, error) {
+func (m *Controller) getNodePods(nodeName string) ([]*corev1.Pod, error) {
 	var out []*corev1.Pod
 	indexer := m.podIndexer
 	items, err := indexer.ByIndex(podNodeNameIndexerName, nodeName)
@@ -248,13 +247,13 @@ func (m *matchController) getNodePods(nodeName string) ([]*corev1.Pod, error) {
 	return out, nil
 }
 
-func (m *matchController) deleteNode(k8sNode *corev1.Node) {
-	m.action.DisableNode(k8sNode)
+func (m *Controller) deleteNode(k8sNode *corev1.Node) {
+	m.action.DisableNodes(k8sNode)
 	delete(m.nodeNameToNode, k8sNode.Name)
 	return
 }
 
-func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) error {
+func (m *Controller) UpdateNode(ctx context.Context, k8sNode *corev1.Node) error {
 	if !k8sNode.ObjectMeta.DeletionTimestamp.IsZero() {
 		m.deleteNode(k8sNode)
 		return nil
@@ -295,20 +294,25 @@ func (m *matchController) updateNode(ctx context.Context, k8sNode *corev1.Node) 
 				return fmt.Errorf("listing node pods: %w", err)
 			}
 			for _, pod := range podList {
-				m.updatePod(pod)
+				m.UpdatePod(pod)
 			}
-			return nil // updatePod will enable the node if appropriate
+			return nil // UpdatePod will enable the node if appropriate
 		}
 		ll.Info("enabling node")
-		m.action.EnableNode(n.k8sNode)
+		n.enabled = true
+		if m.primed {
+			m.action.EnableNodes(n.k8sNode)
+		}
 	} else {
 		ll.Info("disabling node")
-		m.action.DisableNode(n.k8sNode)
+		n.enabled = false
+		// This should be idempotent, so we don't need to care if we're primed yet.
+		m.action.DisableNodes(n.k8sNode)
 	}
 	return nil
 }
 
-func (m *matchController) updatePod(pod *corev1.Pod) error {
+func (m *Controller) UpdatePod(pod *corev1.Pod) error {
 	ll := m.ll.WithFields(logrus.Fields{"pod": pod.Name, "pod_namespace": pod.Namespace})
 	if pod.Spec.NodeName == "" {
 		// This pod hasn't been assigned to a node. Once a pod is assigned to a node, it cannot be
@@ -317,7 +321,7 @@ func (m *matchController) updatePod(pod *corev1.Pod) error {
 		return nil
 	}
 	if !pod.ObjectMeta.DeletionTimestamp.IsZero() {
-		m.deletePod(pod)
+		m.DeletePod(pod)
 		return nil
 	}
 	ll = ll.WithField("node", pod.Spec.NodeName)
@@ -367,19 +371,22 @@ func (m *matchController) updatePod(pod *corev1.Pod) error {
 		n.matchingPods[podKey] = pod.DeepCopy()
 		if len(n.matchingPods) == 1 {
 			ll.Debug("enabling node; pod update met node match criteria")
-			m.action.EnableNode(n.k8sNode)
+			n.enabled = true
+			if m.primed {
+				m.action.EnableNodes(n.k8sNode)
+			}
 		}
 	} else {
 		delete(n.matchingPods, podKey)
 		if len(n.matchingPods) == 0 {
 			ll.Debug("disabling node; updated pod no longer meets node match criteria")
-			m.action.DisableNode(n.k8sNode)
+			m.action.DisableNodes(n.k8sNode)
 		}
 	}
 	return nil
 }
 
-func (m *matchController) deletePod(pod *corev1.Pod) {
+func (m *Controller) DeletePod(pod *corev1.Pod) {
 	if pod.Spec.NodeName == "" {
 		return
 	}
@@ -390,11 +397,11 @@ func (m *matchController) deletePod(pod *corev1.Pod) {
 	podKey := podNamespacedName(pod)
 	delete(n.matchingPods, podKey)
 	if len(n.matchingPods) == 0 {
-		m.action.DisableNode(n.k8sNode)
+		m.action.DisableNodes(n.k8sNode)
 	}
 }
 
-func (m *matchController) isNodeMatch(n *node) bool {
+func (m *Controller) isNodeMatch(n *node) bool {
 	var ready bool
 	for _, c := range n.k8sNode.Status.Conditions {
 		if c.Type == corev1.NodeReady {
@@ -422,33 +429,33 @@ taintLoop:
 }
 
 // OnAdd implements the shared informer ResourceEventHandler for corev1.Pod & corev1.Node.
-func (m *matchController) OnAdd(obj interface{}) {
+func (m *Controller) OnAdd(obj interface{}) {
 	m.OnUpdate(nil, obj)
 }
 
 // OnUpdate implements the shared informer ResourceEventHandler for corev1.Pod & corev1.Node.
-func (m *matchController) OnUpdate(_, newObj interface{}) {
+func (m *Controller) OnUpdate(_, newObj interface{}) {
 	m.Lock()
 	defer m.Unlock()
 	switch r := newObj.(type) {
 	case *corev1.Node:
-		m.updateNode(m.ctx, r)
+		m.UpdateNode(m.ctx, r)
 	case *corev1.Pod:
-		m.updatePod(r)
+		m.UpdatePod(r)
 	default:
 		m.ll.Errorf("informer emitted unexpected type: %T", newObj)
 	}
 }
 
 // OnDelete implements the shared informer ResourceEventHandler for corev1.Pod & corev1.Node.
-func (m *matchController) OnDelete(obj interface{}) {
+func (m *Controller) OnDelete(obj interface{}) {
 	m.Lock()
 	defer m.Unlock()
 	switch r := obj.(type) {
 	case *corev1.Node:
 		m.deleteNode(r)
 	case *corev1.Pod:
-		m.deletePod(r)
+		m.DeletePod(r)
 	default:
 		m.ll.Errorf("informer emitted unexpected type: %T", obj)
 	}
@@ -458,6 +465,7 @@ type node struct {
 	k8sNode      *corev1.Node
 	isNodeMatch  bool
 	matchingPods map[string]*corev1.Pod
+	enabled      bool
 }
 
 func newNode(k8sNode *corev1.Node) *node {
@@ -479,7 +487,7 @@ func podNamespacedName(pod *corev1.Pod) string {
 	return fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 }
 
-func validateMatch(match *flipopv1alpha1.Match) error {
+func ValidateMatch(match *flipopv1alpha1.Match) error {
 	if match.NodeLabel != "" {
 		_, err := labels.Parse(match.NodeLabel)
 		if err != nil {

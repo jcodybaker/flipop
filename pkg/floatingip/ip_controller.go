@@ -1,4 +1,4 @@
-package controllers
+package floatingip
 
 import (
 	"container/list"
@@ -174,7 +174,7 @@ func (i *ipController) updateIPs(ips []string, desiredIPs int) {
 				ll.WithField("node", nodeName).Warn("update removes ip assigned to active node")
 				i.assignableNodes.Add(status.nodeProviderID, true) // This node needs reassigned ASAP.
 			} else {
-				// We don't unassign IPs when DisableNode is called, we just mark the ip as assignable.
+				// We don't unassign IPs when DisableNodes is called, we just mark the ip as assignable.
 				ll.Info("update removes ip assigned to inactive node")
 			}
 			i.assignableIPs.Delete(ip)
@@ -192,6 +192,7 @@ func (i *ipController) updateIPs(ips []string, desiredIPs int) {
 
 // Run will start reconciliation of floating IPs until the context is canceled.
 func (i *ipController) run(ctx context.Context) {
+	i.ll.Info("ipController reconciler started")
 	i.reconcile(ctx)
 	retryTimer := time.NewTimer(i.retryTimerDuration())
 	for {
@@ -212,14 +213,18 @@ func (i *ipController) run(ctx context.Context) {
 func (i *ipController) retryTimerDuration() time.Duration {
 	dur := i.nextRetry.Sub(time.Now())
 	if dur < 0 {
+		i.ll.Debug("ipController reconciliation will retry immediately")
 		return 0
 	}
+	i.ll.WithField("pause", dur.String()).Debug("ipController reconciliation scheduled")
 	return dur
 }
 
 func (i *ipController) reconcile(ctx context.Context) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
+	i.ll.Debug("ipController beginning reconciliation")
+	defer i.ll.Debug("ipController finished reconciliation")
 
 	i.nextRetry = time.Now().Add(reconcilePeriod)
 
@@ -239,7 +244,9 @@ func (i *ipController) reconcile(ctx context.Context) {
 }
 
 func (i *ipController) retry(next time.Time) {
+	i.ll.WithField("pause", next.Sub(time.Now()).String()).Debug("retry requested")
 	if (i.nextRetry == time.Time{}) || (i.nextRetry.After(next)) {
+		i.ll.WithField("pause", next.Sub(time.Now()).String()).Debug("retry scheduled")
 		i.nextRetry = next
 	}
 }
@@ -318,6 +325,7 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 		}
 
 		if status.nextRetry.After(time.Now()) {
+			i.retry(status.nextRetry)
 			continue
 		}
 
@@ -327,7 +335,7 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 		expectedProviderID := status.nodeProviderID
 		ll := i.ll.WithField("ip", ip)
 		ll.Debug("retrieving IP current provider ID")
-		providerID, err := i.provider.IPtoProviderID(ctx, ip)
+		providerID, err := i.provider.IPToProviderID(ctx, ip)
 		if err != nil {
 			if err == provider.ErrNotFound {
 				// If the IP's not found, try to do the best we can. We'll continue to check its
@@ -427,6 +435,7 @@ func (i *ipController) reconcileIPStatus(ctx context.Context) {
 		status.retrySchedule = healthyRetrySchedule
 		_, status.nextRetry = status.retrySchedule.Next(status.attempts)
 		if originalState != status.state || originalMessage != status.message {
+
 			i.updateStatus = true
 		}
 		ll.Debug("provider ip mapping verified")
@@ -495,6 +504,7 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 			status.message = ""
 			status.state = flipopv1alpha1.IPStateInProgress
 			status.retrySchedule = provider.RetryFast
+			status.attempts = 0
 			delete(i.providerIDToRetry, providerID)
 			_, status.nextRetry = status.retrySchedule.Next(status.attempts)
 		} else {
@@ -516,62 +526,74 @@ func (i *ipController) reconcileAssignment(ctx context.Context) {
 	}
 }
 
-func (i *ipController) DisableNode(node *corev1.Node) {
-	providerID := node.Spec.ProviderID
-	if providerID == "" {
-		return
-	}
+func (i *ipController) DisableNodes(nodes ...*corev1.Node) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
-	if _, ok := i.providerIDToNodeName[providerID]; !ok {
-		return // Wasn't enabled
+	for _, node := range nodes {
+		providerID := node.Spec.ProviderID
+		if providerID == "" {
+			continue
+		}
+
+		if _, ok := i.providerIDToNodeName[providerID]; !ok {
+			continue // Wasn't enabled
+		}
+		ll := i.ll.WithFields(logrus.Fields{
+			"node":        node.Name,
+			"provider_id": providerID,
+		})
+		i.updateStatus = true
+		delete(i.providerIDToNodeName, providerID)
+		if ip := i.providerIDToIP[providerID]; ip != "" {
+			// Add this IP to the back of the list. This increases the chances that the IP mapping
+			// can be retained if the node recovers.
+			i.assignableIPs.Add(ip, false)
+			// cancel any pending retries
+			delete(i.ipToStatus, ip)
+			ll.WithField("ip", ip).Info("node disabled; ip added to assignable list")
+		} else {
+			ll.Info("node disabled")
+		}
+		i.assignableNodes.Delete(providerID)
+		// We leave the providerID<->IP mappings in providerIDToIP/ipStatus.nodeProviderID so we can
+		// reuse the IP mapping, if it's not immediately recovered.
+		i.poke()
 	}
-	ll := i.ll.WithFields(logrus.Fields{
-		"node":        node.Name,
-		"provider_id": providerID,
-	})
-	i.updateStatus = true
-	delete(i.providerIDToNodeName, providerID)
-	if ip := i.providerIDToIP[providerID]; ip != "" {
-		// Add this IP to the back of the list. This increases the chances that the IP mapping
-		// can be retained if the node recovers.
-		i.assignableIPs.Add(ip, false)
-		// cancel any pending retries
-		delete(i.ipToStatus, ip)
-		ll.WithField("ip", ip).Info("node disabled; ip added to assignable list")
-	} else {
-		ll.Info("node disabled")
-	}
-	i.assignableNodes.Delete(providerID)
-	// We leave the providerID<->IP mappings in providerIDToIP/ipStatus.nodeProviderID so we can
-	// reuse the IP mapping, if it's not immediately recovered.
-	i.poke()
 }
 
-func (i *ipController) EnableNode(node *corev1.Node) {
-	providerID := node.Spec.ProviderID
-	if providerID == "" {
-		return
-	}
+func (i *ipController) EnableNodes(nodes ...*corev1.Node) {
 	i.lock.Lock()
 	defer i.lock.Unlock()
-	if _, ok := i.providerIDToNodeName[providerID]; ok {
-		return // Already enabled.
+
+	for _, node := range nodes {
+		providerID := node.Spec.ProviderID
+		if providerID == "" {
+			continue
+		}
+		if _, ok := i.providerIDToNodeName[providerID]; ok {
+			continue // Already enabled.
+		}
+		i.poke()
+		i.updateStatus = true
+		i.providerIDToNodeName[providerID] = node.Name
+		ll := i.ll.WithFields(logrus.Fields{
+			"node":        node.Name,
+			"provider_id": providerID,
+		})
+		if ip := i.providerIDToIP[providerID]; ip != "" {
+			ll.WithField("ip", ip).Info("enabling node; already assigned to ip")
+			status, ok := i.ipToStatus[ip]
+			if !ok {
+				i.ipToStatus[ip] = &ipStatus{}
+			}
+			status.state = flipopv1alpha1.IPStateActive
+			status.message = ""
+			i.assignableIPs.Delete(ip)
+			continue // Already has an IP.
+		}
+		ll.Info("enabling node; submitted to assignable node queue")
+		i.assignableNodes.Add(providerID, false)
 	}
-	i.poke()
-	i.updateStatus = true
-	i.providerIDToNodeName[providerID] = node.Name
-	ll := i.ll.WithFields(logrus.Fields{
-		"node":        node.Name,
-		"provider_id": providerID,
-	})
-	if ip := i.providerIDToIP[providerID]; ip != "" {
-		ll.WithField("ip", ip).Info("enabling node; already assigned to ip")
-		i.assignableIPs.Delete(ip)
-		return // Already has an IP.
-	}
-	ll.Info("enabling node; submitted to assignable node queue")
-	i.assignableNodes.Add(providerID, false)
 }
 
 func (i *ipController) poke() {

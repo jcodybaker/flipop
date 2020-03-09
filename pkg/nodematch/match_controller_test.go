@@ -1,11 +1,12 @@
-package controllers
+package nodematch
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus"
+	kt "github.com/digitalocean/flipop/pkg/k8stest"
+	"github.com/digitalocean/flipop/pkg/log"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -17,12 +18,16 @@ type mockNodeEnableDisabler struct {
 	nodes map[string]*corev1.Node
 }
 
-func (mned *mockNodeEnableDisabler) EnableNode(n *corev1.Node) {
-	mned.nodes[n.Name] = n
+func (mned *mockNodeEnableDisabler) EnableNodes(nodes ...*corev1.Node) {
+	for _, n := range nodes {
+		mned.nodes[n.Name] = n
+	}
 }
 
-func (mned *mockNodeEnableDisabler) DisableNode(n *corev1.Node) {
-	delete(mned.nodes, n.Name)
+func (mned *mockNodeEnableDisabler) DisableNodes(nodes ...*corev1.Node) {
+	for _, n := range nodes {
+		delete(mned.nodes, n.Name)
+	}
 }
 
 func (mned *mockNodeEnableDisabler) names() []string {
@@ -33,7 +38,7 @@ func (mned *mockNodeEnableDisabler) names() []string {
 	return out
 }
 
-func TestMatchControllerIsNodeMatch(t *testing.T) {
+func TestControllerIsNodeMatch(t *testing.T) {
 	tcs := []struct {
 		name        string
 		node        *corev1.Node
@@ -42,36 +47,36 @@ func TestMatchControllerIsNodeMatch(t *testing.T) {
 	}{
 		{
 			name: "full match",
-			node: makeNode("", "",
-				setLabels(matchingNodeLabels),
-				setTaints([]corev1.Taint{
+			node: kt.MakeNode("", "",
+				kt.SetLabels(kt.MatchingNodeLabels),
+				kt.SetTaints([]corev1.Taint{
 					corev1.Taint{Key: "shields", Value: "down", Effect: corev1.TaintEffectNoExecute},
 				}),
-				markReady,
+				kt.MarkReady,
 			),
 			match: &flipopv1alpha1.Match{
 				NodeLabel:   "system=bajor",
-				Tolerations: podTolerations,
+				Tolerations: kt.PodTolerations,
 			},
 			expectMatch: true,
 		},
 		{
 			name: "bad taint",
-			node: makeNode("", "",
-				setTaints([]corev1.Taint{
+			node: kt.MakeNode("", "",
+				kt.SetTaints([]corev1.Taint{
 					corev1.Taint{Key: "shields", Value: "up", Effect: corev1.TaintEffectNoExecute},
 				}),
-				markReady,
+				kt.MarkReady,
 			),
 			match: &flipopv1alpha1.Match{
-				Tolerations: podTolerations,
+				Tolerations: kt.PodTolerations,
 			},
 		},
 		{
 			name: "bad label",
-			node: makeNode("", "",
-				setLabels(matchingNodeLabels),
-				markReady,
+			node: kt.MakeNode("", "",
+				kt.SetLabels(kt.MatchingNodeLabels),
+				kt.MarkReady,
 			),
 			match: &flipopv1alpha1.Match{
 				NodeLabel: "system=klingon",
@@ -79,7 +84,7 @@ func TestMatchControllerIsNodeMatch(t *testing.T) {
 		},
 		{
 			name:        "all nodes",
-			node:        makeNode("", "", markReady),
+			node:        kt.MakeNode("", "", kt.MarkReady),
 			match:       &flipopv1alpha1.Match{},
 			expectMatch: true,
 		},
@@ -87,8 +92,9 @@ func TestMatchControllerIsNodeMatch(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			m := &matchController{ll: logrus.New()}
-			m.updateCriteria(tc.match)
+			m := &Controller{ll: log.NewTestLogger(t)}
+			m.UpdateCriteria(tc.match)
+			m.primed = true
 			n := &node{
 				k8sNode:      tc.node,
 				matchingPods: make(map[string]*corev1.Pod),
@@ -98,7 +104,7 @@ func TestMatchControllerIsNodeMatch(t *testing.T) {
 	}
 }
 
-func TestMatchControllerUpdateNode(t *testing.T) {
+func TestControllerUpdateNode(t *testing.T) {
 	tcs := []struct {
 		name                string
 		pods                []*corev1.Pod
@@ -110,29 +116,29 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 		{
 			name: "initial update ready",
 			pods: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			updates: []*corev1.Node{
-				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				kt.MakeNode("rio-grande", "mock://1", kt.MarkReady, kt.SetLabels(kt.MatchingNodeLabels)),
 			},
 			expectEnabledNodes: []string{"rio-grande"},
 		},
 		{
 			name: "initial update not-ready",
 			pods: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			updates: []*corev1.Node{
-				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)),
+				kt.MakeNode("rio-grande", "mock://1", kt.SetLabels(kt.MatchingNodeLabels)),
 			},
 			expectEnabledNodes: []string{},
 		},
 		{
 			name: "initial update no pod match",
 			updates: []*corev1.Node{
-				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				kt.MakeNode("rio-grande", "mock://1", kt.MarkReady, kt.SetLabels(kt.MatchingNodeLabels)),
 			},
 			manip: func(m *flipopv1alpha1.Match) {
 				m.PodNamespace = ""
@@ -143,28 +149,28 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 		{
 			name: "update from not-ready to ready",
 			pods: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-				makePod("worf", "orinoco",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
+				kt.MakePod("worf", "orinoco",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			updates: []*corev1.Node{
-				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not yet ready
-				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
+				kt.MakeNode("rio-grande", "mock://1", kt.SetLabels(kt.MatchingNodeLabels)), // not yet ready
+				kt.MakeNode("rio-grande", "mock://1", kt.MarkReady, kt.SetLabels(kt.MatchingNodeLabels)),
 			},
 			expectEnabledNodes: []string{"rio-grande"},
 		},
 		{
 			name: "update from ready to not-ready",
 			pods: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-				makePod("worf", "orinoco",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
+				kt.MakePod("worf", "orinoco",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			updates: []*corev1.Node{
-				makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)),
-				makeNode("rio-grande", "mock://1", setLabels(matchingNodeLabels)), // not ready
+				kt.MakeNode("rio-grande", "mock://1", kt.MarkReady, kt.SetLabels(kt.MatchingNodeLabels)),
+				kt.MakeNode("rio-grande", "mock://1", kt.SetLabels(kt.MatchingNodeLabels)), // not ready
 			},
 			expectEnabledNodes: []string{},
 		},
@@ -176,12 +182,13 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 		defer cancel()
 
 		t.Run(tc.name, func(t *testing.T) {
-			m := &matchController{ll: logrus.New()}
-			k8s := makeMatch()
+			m := &Controller{ll: log.NewTestLogger(t)}
+			k8s := kt.MakeMatch()
 			if tc.manip != nil {
 				tc.manip(&k8s)
 			}
-			m.updateCriteria(&k8s)
+			m.UpdateCriteria(&k8s)
+			m.primed = true
 			nMock := &mockNodeEnableDisabler{nodes: make(map[string]*corev1.Node)}
 			m.action = nMock
 
@@ -193,7 +200,7 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 			}
 
 			for _, n := range tc.updates {
-				err := m.updateNode(ctx, n)
+				err := m.UpdateNode(ctx, n)
 				require.NoError(t, err)
 			}
 			require.ElementsMatch(t, tc.expectEnabledNodes, nMock.names())
@@ -202,7 +209,7 @@ func TestMatchControllerUpdateNode(t *testing.T) {
 	}
 }
 
-func TestMatchControllerUpdatePod(t *testing.T) {
+func TestControllerUpdatePod(t *testing.T) {
 	tcs := []struct {
 		name                string
 		initialIPAssignment map[string]string
@@ -212,18 +219,18 @@ func TestMatchControllerUpdatePod(t *testing.T) {
 		{
 			name: "pod makes node assignable",
 			updates: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			expectEnabledNodes: []string{"rio-grande"},
 		},
 		{
 			name: "pod not-ready causes node to no longer match",
 			updates: []*corev1.Pod{
-				makePod("benjamin-sisko", "rio-grande",
-					markReady, markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
-				makePod("benjamin-sisko", "rio-grande",
-					markRunning, setNamespace("star-fleet"), setLabels(matchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkReady, kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
+				kt.MakePod("benjamin-sisko", "rio-grande",
+					kt.MarkRunning, kt.SetNamespace("star-fleet"), kt.SetLabels(kt.MatchingPodLabels)),
 			},
 			expectEnabledNodes: []string{},
 		},
@@ -234,21 +241,22 @@ func TestMatchControllerUpdatePod(t *testing.T) {
 		ctx := context.Background()
 
 		t.Run(tc.name, func(t *testing.T) {
-			m := &matchController{ll: logrus.New()}
-			k8s := makeMatch()
-			m.updateCriteria(&k8s)
+			m := &Controller{ll: log.NewTestLogger(t)}
+			k8s := kt.MakeMatch()
+			m.UpdateCriteria(&k8s)
+			m.primed = true
 			nMock := &mockNodeEnableDisabler{nodes: make(map[string]*corev1.Node)}
 			m.action = nMock
 
 			m.podIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
-				podNodeNameIndexerName: podNodeNameIndexer, // Necessary for updateNode used in setup
+				podNodeNameIndexerName: podNodeNameIndexer, // Necessary for UpdateNode used in setup
 			})
 
-			err := m.updateNode(ctx, makeNode("rio-grande", "mock://1", markReady, setLabels(matchingNodeLabels)))
+			err := m.UpdateNode(ctx, kt.MakeNode("rio-grande", "mock://1", kt.MarkReady, kt.SetLabels(kt.MatchingNodeLabels)))
 			require.NoError(t, err)
 
 			for _, p := range tc.updates {
-				m.updatePod(p)
+				m.UpdatePod(p)
 			}
 
 			require.ElementsMatch(t, tc.expectEnabledNodes, nMock.names())

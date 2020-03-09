@@ -64,7 +64,7 @@ func NewDigitalOcean() Provider {
 	}
 }
 
-func (do *digitalOcean) IPtoProviderID(ctx context.Context, ip string) (string, error) {
+func (do *digitalOcean) IPToProviderID(ctx context.Context, ip string) (string, error) {
 	err := do.asyncStatus(ctx, ip)
 	if err != nil {
 		return "", err
@@ -103,7 +103,7 @@ func (do *digitalOcean) AssignIP(ctx context.Context, ip, providerID string) err
 
 				// Check the IP's current provider.  If this fails, eat the error and return the
 				// assign error.
-				curProvider, iErr := do.IPtoProviderID(ctx, ip)
+				curProvider, iErr := do.IPToProviderID(ctx, ip)
 				if curProvider != "" && curProvider == providerID {
 					return nil // Already set to us. This is success.
 				}
@@ -201,7 +201,7 @@ func (do *digitalOcean) NodeToIP(ctx context.Context, providerID string) (string
 	// There's nothing explicitly saying the order of IPs, but it seems the FLIP is normally second.
 	for i := len(ips) - 1; i >= 0; i++ {
 		ip := ips[i]
-		ipProvider, err := do.IPtoProviderID(ctx, ip)
+		ipProvider, err := do.IPToProviderID(ctx, ip)
 		if err == ErrNotFound {
 			continue
 		}

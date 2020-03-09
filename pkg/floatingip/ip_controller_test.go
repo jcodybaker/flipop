@@ -1,4 +1,4 @@
-package controllers
+package floatingip
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/digitalocean/flipop/pkg/log"
 	"github.com/digitalocean/flipop/pkg/provider"
 )
 
@@ -63,7 +64,7 @@ func TestIPControllerReconcileDesiredIPs(t *testing.T) {
 						return ip, err
 					},
 				},
-				ll: logrus.New(),
+				ll: log.NewTestLogger(t),
 			}
 			i.reconcileDesiredIPs(ctx)
 			require.ElementsMatch(t, tc.expectPendingIPs, i.pendingIPs)
@@ -199,8 +200,8 @@ func TestIPControllerReconcileIPStatus(t *testing.T) {
 			ctx := context.Background()
 			i := newIPController(logrus.New(), nil, nil)
 			i.updateProvider(&provider.MockProvider{
-				IPtoProviderIDFunc: func(_ context.Context, ip string) (string, error) {
-					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to IPtoProviderIDFunc")
+				IPToProviderIDFunc: func(_ context.Context, ip string) (string, error) {
+					require.GreaterOrEqual(t, len(tc.responses), 1, "unexpected call to IPToProviderIDFunc")
 					require.Equal(t, tc.responses[0].ip, ip)
 					providerID := tc.responses[0].providerID
 					err := tc.responses[0].err
@@ -341,7 +342,7 @@ func TestIPControllerReconcileAssignment(t *testing.T) {
 	}
 }
 
-func TestIPControllerDisableNode(t *testing.T) {
+func TestIPControllerDisableNodes(t *testing.T) {
 	tcs := []struct {
 		name               string
 		setup              func(i *ipController)
@@ -375,7 +376,7 @@ func TestIPControllerDisableNode(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(i)
 			}
-			i.DisableNode(&corev1.Node{
+			i.DisableNodes(&corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "hello-world"},
 				Spec:       corev1.NodeSpec{ProviderID: "mock://1"},
 			})
@@ -388,7 +389,7 @@ func TestIPControllerDisableNode(t *testing.T) {
 	}
 }
 
-func TestIPControllerEnableNode(t *testing.T) {
+func TestIPControllers(t *testing.T) {
 	tcs := []struct {
 		name             string
 		setup            func(i *ipController)
@@ -419,11 +420,11 @@ func TestIPControllerEnableNode(t *testing.T) {
 	for _, tc := range tcs {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			i := newIPController(logrus.New(), nil, nil)
+			i := newIPController(log.NewTestLogger(t), nil, nil)
 			if tc.setup != nil {
 				tc.setup(i)
 			}
-			i.EnableNode(&corev1.Node{
+			i.EnableNodes(&corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: "hello-world"},
 				Spec:       corev1.NodeSpec{ProviderID: "mock://1"},
 			})

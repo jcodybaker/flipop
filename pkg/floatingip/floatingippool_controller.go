@@ -23,14 +23,16 @@ SOFTWARE.
 
 */
 
-package controllers
+package floatingip
 
 import (
 	"context"
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
+	"github.com/digitalocean/flipop/pkg/nodematch"
 	"github.com/digitalocean/flipop/pkg/provider"
 	"github.com/sirupsen/logrus"
 
@@ -42,6 +44,10 @@ import (
 	flipopCS "github.com/digitalocean/flipop/pkg/apis/flipop/generated/clientset/versioned"
 	flipopInformers "github.com/digitalocean/flipop/pkg/apis/flipop/generated/informers/externalversions/flipop/v1alpha1"
 	flipopv1alpha1 "github.com/digitalocean/flipop/pkg/apis/flipop/v1alpha1"
+)
+
+const (
+	floatingIPPoolResyncPeriod = 5 * time.Minute
 )
 
 // FloatingIPPoolController watches for FloatingIPPool and then manages reconciliation for each
@@ -61,7 +67,7 @@ type FloatingIPPoolController struct {
 }
 
 type floatingIPPool struct {
-	matchController *matchController
+	matchController *nodematch.Controller
 	ipController    *ipController
 }
 
@@ -99,7 +105,7 @@ func (c *FloatingIPPoolController) Run(ctx context.Context) {
 	for _, m := range c.pools {
 		// Our parent's canceling of the context should stop all of the children concurrently.
 		// This loop just verifies all children have completed.
-		m.matchController.stop()
+		m.matchController.Stop()
 		// TODO - stop the ipController
 	}
 }
@@ -137,14 +143,14 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 			c.ipUpdater(ll, k8sPool.Name, k8sPool.Namespace),
 			c.statusUpdater(ll, k8sPool.Name, k8sPool.Namespace))
 		pool = floatingIPPool{
-			matchController: newMatchController(ll, c.kubeCS, ipc),
+			matchController: nodematch.NewController(ll, c.kubeCS, ipc),
 			ipController:    ipc,
 		}
 		ll.Info("FloatingIPPool added; beginning reconciliation")
 		c.pools[k8sPool.GetSelfLink()] = pool
 	}
 	if !isValid {
-		pool.matchController.stop()
+		pool.matchController.Stop()
 		pool.ipController.stop()
 		delete(c.pools, k8sPool.GetSelfLink())
 		return
@@ -153,19 +159,19 @@ func (c *FloatingIPPoolController) updateOrAdd(k8sPool *flipopv1alpha1.FloatingI
 	prov := c.providers[k8sPool.Spec.Provider]
 	ipChange := pool.ipController.updateProvider(prov, k8sPool.Spec.Region)
 
-	matchChange := pool.matchController.updateCriteria(&k8sPool.Spec.Match)
+	matchChange := pool.matchController.UpdateCriteria(&k8sPool.Spec.Match)
 	if matchChange {
 		// Changing match criteria invalids any existing assignment, restart the ipController.
 		// Assignments for nodes matching both old and new criteria, should remain in place.
 		pool.ipController.stop()
 		ipChange = true
-		pool.matchController.start(c.ctx)
+		pool.matchController.Start(c.ctx)
 	}
 
 	pool.ipController.updateIPs(k8sPool.Spec.IPs, k8sPool.Spec.DesiredIPs)
 	if ipChange {
 		pool.ipController.start(c.ctx)
-		pool.matchController.resync()
+		// TODO pool.matchController.Resync()
 	}
 }
 
@@ -180,7 +186,7 @@ func (c *FloatingIPPoolController) validate(ll logrus.FieldLogger, k8sPool *flip
 		ll.Warn("FloatingIPPool had neither ips nor desiredIPs")
 		return false
 	}
-	err := validateMatch(&k8sPool.Spec.Match)
+	err := nodematch.ValidateMatch(&k8sPool.Spec.Match)
 	if err != nil {
 		c.updateStatus(k8sPool, "Error "+err.Error())
 		ll.WithError(err).Warn("FloatingIPPool had invalid match criteria")
@@ -202,7 +208,7 @@ func (c *FloatingIPPoolController) OnDelete(obj interface{}) {
 		return
 	}
 	c.ll.WithField("floating_ip_pool", fmt.Sprintf("%s/%s", k8sPool.Namespace, k8sPool.Name)).Info("pool deleted")
-	pool.matchController.stop()
+	pool.matchController.Stop()
 	pool.ipController.stop()
 	delete(c.pools, k8sPool.GetSelfLink())
 }
